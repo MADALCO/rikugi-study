@@ -4,12 +4,37 @@ import { PdfView } from './PdfView';
 import type { Subject } from '../lib/exam';
 import { getLayout, saveLayout } from '../lib/db';
 import { wrapFragments, type DocLayout, type Item, type Row } from '../lib/reflow';
-import { ANALYSIS_WIDTH, analyzePdf, openPdf, renderPage } from '../lib/reflowPdf';
+import { analyzePdf, openPdf, renderRegion, type Region } from '../lib/reflowPdf';
 
 const SIZES = [15, 18, 22, 27];
 const SIZE_KEY = 'rikugi-reflow-size';
 const MAX_DPR = 2;
 const SIDE_PADDING = 12;
+// iOS Safariはcanvas1枚の面積(約1677万px)と総メモリに上限があり、超えるとタブごと落ちる。
+const MAX_SOURCE_PIXELS = 6_000_000;
+const MAX_OUTPUT_PIXELS = 8_000_000;
+const MAX_ZOOM_PIXELS = 6_000_000;
+const REGION_PAD = 3;
+
+/** ページから切り出して描いた部分。座標は解析幅基準。 */
+interface Source {
+  canvas: HTMLCanvasElement;
+  left: number;
+  top: number;
+  ratio: number;
+}
+
+/** Safariは幅と高さの両方を0にしないとcanvasのメモリを返さないことがある。 */
+function release(canvas: HTMLCanvasElement) {
+  canvas.width = 0;
+  canvas.height = 0;
+}
+
+/** 面積が上限を超えないよう、描画倍率を下げる。 */
+function capRatio(ratio: number, width: number, height: number, max: number): number {
+  const pixels = width * height * ratio * ratio;
+  return pixels > max ? ratio * Math.sqrt(max / pixels) : ratio;
+}
 
 function readSize(): number {
   try {
@@ -68,7 +93,7 @@ function paintMask(context: CanvasRenderingContext2D, block: Block, x: number, y
 }
 
 /** 縮小表示の図・選択肢を、本文と同じ倍率で全画面に出す。はみ出す分は指で動かして見る。 */
-function BlockZoom({ block, source, ratio, zoom, dpr, onClose }: { block: Block; source: HTMLCanvasElement; ratio: number; zoom: number; dpr: number; onClose: () => void }) {
+function BlockZoom({ block, source, zoom, dpr, onClose }: { block: Block; source: Source; zoom: number; dpr: number; onClose: () => void }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const width = block.right - block.left;
   const height = block.bottom - block.top;
@@ -76,13 +101,19 @@ function BlockZoom({ block, source, ratio, zoom, dpr, onClose }: { block: Block;
   useEffect(() => {
     const canvas = canvasRef.current;
     const context = canvas?.getContext('2d');
-    if (!canvas || !context) return;
-    canvas.width = Math.ceil(width * zoom * dpr);
-    canvas.height = Math.ceil(height * zoom * dpr);
+    // 元の描画が解放済みなら描かない(解放済みのcanvasを描くと例外になる)。
+    if (!canvas || !context || source.canvas.width === 0) return;
+    const scale = capRatio(zoom * dpr, width, height, MAX_ZOOM_PIXELS);
+    canvas.width = Math.ceil(width * scale);
+    canvas.height = Math.ceil(height * scale);
+    context.fillStyle = '#fff';
+    context.fillRect(0, 0, canvas.width, canvas.height);
     context.imageSmoothingQuality = 'high';
-    context.drawImage(source, block.left * ratio, block.top * ratio, width * ratio, height * ratio, 0, 0, canvas.width, canvas.height);
-    paintMask(context, block, 0, 0, zoom * dpr);
-  }, [block, source, ratio, zoom, dpr, width, height]);
+    const { ratio } = source;
+    context.drawImage(source.canvas, (block.left - source.left) * ratio, (block.top - source.top) * ratio, width * ratio, height * ratio, 0, 0, canvas.width, canvas.height);
+    paintMask(context, block, 0, 0, scale);
+    return () => release(canvas);
+  }, [block, source, zoom, dpr, width, height]);
 
   return (
     <div className="block-zoom" role="dialog" aria-label="拡大表示">
@@ -114,8 +145,8 @@ export const ReflowView = memo(function ReflowView({ data, file, subject, questi
   const [painting, setPainting] = useState(true);
   const holderRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const pageCache = useRef(new Map<number, HTMLCanvasElement>());
-  const paintRef = useRef<{ placed: Placed[]; zoom: number; dpr: number; ratio: number } | null>(null);
+  const pageCache = useRef(new Map<number, Source>());
+  const paintRef = useRef<{ placed: Placed[]; zoom: number; dpr: number } | null>(null);
   const [zoomed, setZoomed] = useState<Block | null>(null);
   const [shrunk, setShrunk] = useState(false);
 
@@ -141,7 +172,7 @@ export const ReflowView = memo(function ReflowView({ data, file, subject, questi
     return () => {
       cancelled = true;
       setDoc(null);
-      for (const canvas of cache.values()) canvas.width = 0;
+      for (const source of cache.values()) release(source.canvas);
       cache.clear();
       handle.destroy();
     };
@@ -167,36 +198,47 @@ export const ReflowView = memo(function ReflowView({ data, file, subject, questi
       const viewWidth = holder.clientWidth - SIDE_PADDING * 2;
       const dpr = Math.min(window.devicePixelRatio || 1, MAX_DPR);
       const { placed, height, zoom } = placeItems(items, layout, viewWidth, size);
-      const pageWidth = Math.round(ANALYSIS_WIDTH * zoom * dpr);
-      const ratio = pageWidth / ANALYSIS_WIDTH;
-
-      const pagesNeeded = new Set<number>();
+      // ページごとに、この問題で使う範囲だけを求める。
+      const regions = new Map<number, Region>();
+      const include = (page: number, left: number, top: number, right: number, bottom: number) => {
+        const region = regions.get(page);
+        if (!region) regions.set(page, { left, top, right, bottom });
+        else {
+          region.left = Math.min(region.left, left);
+          region.top = Math.min(region.top, top);
+          region.right = Math.max(region.right, right);
+          region.bottom = Math.max(region.bottom, bottom);
+        }
+      };
       for (const entry of placed) {
-        if (entry.kind === 'block') pagesNeeded.add(entry.item.page);
-        else entry.row.fragments.forEach((fragment) => pagesNeeded.add(fragment.page));
+        if (entry.kind === 'block') include(entry.item.page, entry.item.left, entry.item.top, entry.item.right, entry.item.bottom);
+        else for (const fragment of entry.row.fragments) include(fragment.page, fragment.x0, fragment.top, fragment.x1, fragment.bottom);
       }
 
+      // 前の問題の描画を先に解放してから描く(同時に持たない)。
       const cache = pageCache.current;
-      for (const [number, cached] of cache) {
-        if (!pagesNeeded.has(number) || cached.width !== pageWidth) {
-          cached.width = 0;
-          cache.delete(number);
+      for (const source of cache.values()) release(source.canvas);
+      cache.clear();
+      for (const [number, raw] of regions) {
+        const region = {
+          left: Math.max(0, Math.floor(raw.left) - REGION_PAD),
+          top: Math.max(0, Math.floor(raw.top) - REGION_PAD),
+          right: Math.ceil(raw.right) + REGION_PAD,
+          bottom: Math.ceil(raw.bottom) + REGION_PAD,
+        };
+        const ratio = capRatio(zoom * dpr, region.right - region.left, region.bottom - region.top, MAX_SOURCE_PIXELS);
+        const rendered = await renderRegion(doc, number, ratio, region);
+        if (cancelled) {
+          release(rendered);
+          return;
         }
-      }
-      for (const number of pagesNeeded) {
-        if (!cache.has(number)) {
-          const rendered = await renderPage(doc, number, pageWidth);
-          if (cancelled) {
-            rendered.width = 0;
-            return;
-          }
-          cache.set(number, rendered);
-        }
+        cache.set(number, { canvas: rendered, left: region.left, top: region.top, ratio });
       }
       if (cancelled) return;
 
-      canvas.width = Math.ceil(viewWidth * dpr);
-      canvas.height = Math.ceil(height * dpr);
+      const out = capRatio(dpr, viewWidth, height, MAX_OUTPUT_PIXELS);
+      canvas.width = Math.ceil(viewWidth * out);
+      canvas.height = Math.ceil(height * out);
       canvas.style.width = `${viewWidth}px`;
       canvas.style.height = `${height}px`;
       const context = canvas.getContext('2d');
@@ -209,22 +251,24 @@ export const ReflowView = memo(function ReflowView({ data, file, subject, questi
         if (entry.kind === 'block') {
           const { item, y, scale } = entry;
           const source = cache.get(item.page)!;
+          const { ratio } = source;
           const w = item.right - item.left;
           const h = item.bottom - item.top;
-          context.drawImage(source, item.left * ratio, item.top * ratio, w * ratio, h * ratio, 0, y * dpr, w * scale * dpr, h * scale * dpr);
-          paintMask(context, item, 0, y * dpr, scale * dpr);
+          context.drawImage(source.canvas, (item.left - source.left) * ratio, (item.top - source.top) * ratio, w * ratio, h * ratio, 0, y * out, w * scale * out, h * scale * out);
+          paintMask(context, item, 0, y * out, scale * out);
         } else {
           const { row, y } = entry;
           for (const fragment of row.fragments) {
             const source = cache.get(fragment.page)!;
+            const { ratio } = source;
             const w = fragment.x1 - fragment.x0;
             const h = fragment.bottom - fragment.top;
             const top = y + (row.ascent - (fragment.baseline - fragment.top)) * zoom;
-            context.drawImage(source, fragment.x0 * ratio, fragment.top * ratio, w * ratio, h * ratio, fragment.dx * zoom * dpr, top * dpr, w * zoom * dpr, h * zoom * dpr);
+            context.drawImage(source.canvas, (fragment.x0 - source.left) * ratio, (fragment.top - source.top) * ratio, w * ratio, h * ratio, fragment.dx * zoom * out, top * out, w * zoom * out, h * zoom * out);
           }
         }
       }
-      paintRef.current = { placed, zoom, dpr, ratio };
+      paintRef.current = { placed, zoom, dpr };
       setShrunk(placed.some((entry) => entry.kind === 'block' && entry.scale < zoom * 0.98));
       setPainting(false);
     })().catch(() => {
@@ -282,7 +326,6 @@ export const ReflowView = memo(function ReflowView({ data, file, subject, questi
         <BlockZoom
           block={zoomed}
           source={zoomSource}
-          ratio={paintRef.current.ratio}
           zoom={paintRef.current.zoom}
           dpr={paintRef.current.dpr}
           onClose={() => setZoomed(null)}

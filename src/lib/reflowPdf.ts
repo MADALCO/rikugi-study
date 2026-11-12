@@ -39,6 +39,38 @@ export async function renderPage(doc: PDFDocumentProxy, number: number, width: n
   return canvas;
 }
 
+export interface Region {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+}
+
+/**
+ * ページの一部だけを描く。座標は解析幅(ANALYSIS_WIDTH)基準で、ratio は解析幅1pxあたりの描画px。
+ * iOSはcanvasの総メモリが厳しいので、表示用にページ全体を高解像度で描かない。
+ */
+export async function renderRegion(doc: PDFDocumentProxy, number: number, ratio: number, region: Region): Promise<HTMLCanvasElement> {
+  const page = await doc.getPage(number);
+  const scale = (ratio * ANALYSIS_WIDTH) / page.getViewport({ scale: 1 }).width;
+  const viewport = page.getViewport({ scale });
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.ceil((region.right - region.left) * ratio));
+  canvas.height = Math.max(1, Math.ceil((region.bottom - region.top) * ratio));
+  const context = canvas.getContext('2d');
+  if (!context) throw new Error('canvasを作成できません');
+  context.fillStyle = '#fff';
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  await page.render({
+    canvasContext: context,
+    viewport,
+    intent: 'print',
+    transform: [1, 0, 0, 1, -region.left * ratio, -region.top * ratio],
+  }).promise;
+  page.cleanup();
+  return canvas;
+}
+
 function toInk(canvas: HTMLCanvasElement): Ink {
   const { width, height } = canvas;
   const rgba = canvas.getContext('2d')!.getImageData(0, 0, width, height).data;

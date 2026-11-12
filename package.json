@@ -12,7 +12,8 @@
     "preview": "vite preview",
     "test": "vitest run",
     "fetch-pdfs": "node scripts/fetch-pdfs.mjs",
-    "build-library": "node scripts/build-library.mjs"
+    "build-library": "node scripts/build-library.mjs",
+    "build-layouts": "node scripts/build-layouts.mjs"
   },
   "dependencies": {
     "fflate": "0.8.2",

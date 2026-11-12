@@ -938,7 +938,8 @@ export function refineBands(ink: Ink, bands: Band[], textHeight: number): Band[]
     }
   }
   // 凡例を図に移したあとに残る小さな切れ端(根号の上の線など)は、分子の行と同じく次の行へまとめる。
-  return splitRowAlignedTable(ink, mergeFractionRows(absorbFigureLabels(ink, result, textHeight), textHeight), textHeight);
+  // 図にラベルを含めると図の範囲が広がり、そのすぐ外のラベルも図に近くなるので、2回通す。
+  return splitRowAlignedTable(ink, mergeFractionRows(absorbFigureLabels(ink, absorbFigureLabels(ink, result, textHeight), textHeight), textHeight), textHeight);
 }
 
 /**
@@ -949,12 +950,21 @@ function absorbFigureLabels(ink: Ink, bands: Band[], textHeight: number): Band[]
   const W = ink.width;
   const figures = bands.filter((band) => band.figure);
   // 凡例を除いた残り。何行かがつながった帯(凡例が行の間にまたがっていた)なら、行ごとに分け直す。
-  const remainder = (band: Band, atoms: Atom[], right: number): Band[] => {
+  // とても背の高い帯(行の4.5倍超)は、行に分け直せたときだけ凡例を切り離す(分けられなければ null で、帯はそのまま)。
+  const remainder = (band: Band, atoms: Atom[], right: number): Band[] | null => {
     const rest = { ...band, atoms, right };
+    const tall = band.bottom - band.top > textHeight * 4.5;
     if (band.bottom - band.top <= textHeight * 1.8) return [rest];
-    const lines = componentLines(ink, band.top, band.bottom, band.left, right + 1, textHeight);
-    if (!lines || lines.length < 2 || !lines.every((line) => line.bottom - line.top <= textHeight * 1.8)) return [rest];
-    return lines.map((line) => ({
+    const limit = textHeight * (tall ? 3 : 1.8);
+    let lines = componentLines(ink, band.top, band.bottom, band.left, right + 1, textHeight);
+    // 字ごとに分けられない(分数の行など)ときは、上下の空白で切る。
+    if (!lines || lines.length < 2 || !lines.every((line) => line.bottom - line.top <= limit)) {
+      const pieces = rowPieces(ink, band.top, band.bottom, band.left, right + 1, textHeight);
+      lines = pieces.length >= 2 ? pieces.map((piece) => makeBandIn(ink, piece.top, piece.bottom, band.left, right + 1)).filter((line) => line.atoms.length > 0) : null;
+    }
+    const ok = lines && lines.length >= 2 && lines.every((line) => line.bottom - line.top <= limit);
+    if (!ok) return tall ? null : [rest];
+    return lines!.map((line) => ({
       ...line,
       ...(band.limit !== undefined && { limit: band.limit }),
       ...(band.columnLeft !== undefined && { columnLeft: band.columnLeft }),
@@ -970,7 +980,7 @@ function absorbFigureLabels(ink: Ink, bands: Band[], textHeight: number): Band[]
       band.right - band.left < W * 0.25 &&
       band.top > ink.height * 0.85 &&
       (band.left > W * 0.5 || (Math.abs((band.left + band.right) / 2 - W / 2) < W * 0.06 && band.right - band.left < W * 0.1));
-    if (footer || band.figure || band.mask || band.masks || band.bottom - band.top > textHeight * 4.5 || band.atoms.length === 0) {
+    if (footer || band.figure || band.mask || band.masks || band.bottom - band.top > textHeight * 6 || band.atoms.length === 0) {
       out.push(band);
       continue;
     }
@@ -998,12 +1008,13 @@ function absorbFigureLabels(ink: Ink, bands: Band[], textHeight: number): Band[]
               other.atoms.some((atom, j) => Math.abs(atom.x0 - group[0].x0) <= textHeight && (j === 0 || atom.x0 - other.atoms[j - 1].x1 >= textHeight * 2)),
           ).length
         : 0;
-      if (clean && alignedUnder <= 3) {
+      const kept = clean && alignedUnder <= 3 ? (split > 0 ? remainder(band, band.atoms.slice(0, split), band.atoms[split - 1].x1) : []) : null;
+      if (kept) {
         under.left = Math.min(under.left, group[0].x0);
         under.right = Math.max(under.right, group[group.length - 1].x1);
         under.top = Math.min(under.top, band.top);
         under.bottom = Math.max(under.bottom, band.bottom);
-        if (split > 0) out.push(...remainder(band, band.atoms.slice(0, split), band.atoms[split - 1].x1));
+        out.push(...kept);
         continue;
       }
     }
@@ -1033,14 +1044,15 @@ function absorbFigureLabels(ink: Ink, bands: Band[], textHeight: number): Band[]
         other.top < figure.bottom + textHeight * 4 &&
         other.atoms.some((atom, j) => Math.abs(atom.x0 - labelLeft) <= textHeight && (j === 0 || atom.x0 - other.atoms[j - 1].x1 >= textHeight * 2)),
     ).length;
-    if (band.right - labelLeft > textHeight * 10 || !separated || aligned > 3) {
+    const kept = band.right - labelLeft > textHeight * 10 || !separated || aligned > 3 ? null : start > 0 ? remainder(band, atoms.slice(0, start), atoms[start - 1].x1) : [];
+    if (!kept) {
       out.push(band);
       continue;
     }
     figure.left = Math.min(figure.left, labelLeft);
     figure.top = Math.min(figure.top, band.top);
     figure.bottom = Math.max(figure.bottom, band.bottom);
-    if (start > 0) out.push(...remainder(band, atoms.slice(0, start), atoms[start - 1].x1));
+    out.push(...kept);
   }
   return out;
 }
@@ -1425,6 +1437,40 @@ function mergeFractionRows(lines: Band[], textHeight: number): Band[] {
       } else merged.push({ ...atom });
     }
     lines.splice(k, 2, { ...next, top: Math.min(small.top, next.top), atoms: merged });
+  }
+  // 分数の分母だけが下に分かれた短い切れ端(すぐ上の行に接している)は、上の行へまとめる。
+  for (let k = 1; k < lines.length; k++) {
+    const small = lines[k];
+    const prev = lines[k - 1];
+    const next = lines[k + 1];
+    if (
+      small.figure ||
+      prev.figure ||
+      small.mask ||
+      small.masks ||
+      !(small.atoms.length <= 3 && small.right - small.left <= textHeight * 4 && small.bottom - small.top <= textHeight * 1.25) ||
+      small.top - prev.bottom > 4 ||
+      small.left < prev.left ||
+      small.right > prev.right ||
+      // 上の行が式の行(短い)のときだけ。文章の行の下の切れ端は、次の式の分子のことがある。
+      prev.right - prev.left > textHeight * 12 ||
+      (next !== undefined && !next.figure && next.top - small.bottom <= 4)
+    ) {
+      continue;
+    }
+    const withRange = (band: Band) => band.atoms.map((atom) => ({ ...atom, y0: atom.y0 ?? band.top, y1: atom.y1 ?? band.bottom }));
+    const atoms = [...withRange(prev), ...withRange(small)].sort((a, b) => a.x0 - b.x0);
+    const merged: Atom[] = [];
+    for (const atom of atoms) {
+      const last = merged[merged.length - 1];
+      if (last && atom.x0 <= last.x1) {
+        last.x1 = Math.max(last.x1, atom.x1);
+        last.y0 = Math.min(last.y0!, atom.y0!);
+        last.y1 = Math.max(last.y1!, atom.y1!);
+      } else merged.push({ ...atom });
+    }
+    lines.splice(k - 1, 2, { ...prev, bottom: Math.max(prev.bottom, small.bottom), atoms: merged });
+    k -= 1;
   }
   return lines;
 }
@@ -2306,7 +2352,7 @@ export function analyzeDocument(pages: PageBands[], expected: number, forced?: L
       const rightEdge =
         band.limit !== undefined
           ? (columnRights.get(band.limit) ?? band.limit)
-          : nextColumnRight !== undefined && band.right < questionRight - W * 0.02 && Math.abs(band.right - nextColumnRight) <= W * 0.02
+          : nextColumnRight !== undefined && band.right < questionRight - W * 0.02 && Math.abs(band.right - nextColumnRight) <= W * 0.02 && band.right - band.left >= W * 0.2
             ? nextColumnRight
             : questionRight;
       // 表の行(列の間に大きな空白がある)は、右端まで届いていても文章として折り返さない。
@@ -2350,7 +2396,8 @@ export function analyzeDocument(pages: PageBands[], expected: number, forced?: L
           band.left >= previousFull.left - W * 0.03;
         if (continues && current?.kind === 'text') current.fragments.push(...toFragments(page, band));
         else items.push({ kind: 'text', fragments: toFragments(page, band) });
-        previousFull = band.right >= rightEdge - W * 0.02 ? band : null;
+        // 短い行(選択肢の式など)は、段の右端がその行自身で決まるので「右端まで届いた」とみなさない。
+        previousFull = band.right >= rightEdge - W * 0.02 && band.right - band.left >= W * 0.2 ? band : null;
         continue;
       }
 

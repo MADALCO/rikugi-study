@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { unzipSync } from 'fflate';
-import { exportBackup, getCatalog, getLastBackupAt, importBackup, saveLibrary, type Catalog } from '../lib/db';
+import { exportBackup, getCatalog, getLastBackupAt, importBackup, LAYOUT_VERSION, saveLayouts, saveLibrary, type Catalog } from '../lib/db';
+import type { DocLayout } from '../lib/reflow';
 
 const isStandalone = () =>
   window.matchMedia('(display-mode: standalone)').matches ||
@@ -36,12 +37,43 @@ export function Settings() {
     setBusy(true);
     setMessage('ZIPを展開しています…');
     try {
-      const entries = unzipSync(new Uint8Array(await file.arrayBuffer()));
-      if (!entries['catalog.json']) throw new Error('catalog.json がありません。ライブラリのZIPを選んでください。');
-      const catalog = JSON.parse(new TextDecoder().decode(entries['catalog.json'])) as Catalog;
-      const pdfs = new Map(Object.entries(entries).filter(([name]) => name.endsWith('.pdf')));
-      await saveLibrary(catalog, pdfs, (done, total) => setMessage(`保存しています… ${done}/${total}`));
-      setMessage(`${catalog.exams.length}回分を読み込みました。`);
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      // 切り分けデータ(科目ごとのファイル)は、iPhoneのメモリを使い過ぎないよう、あとで1つずつ展開する。
+      const layoutNames: string[] = [];
+      const entries = unzipSync(bytes, {
+        filter: (entry) => {
+          if (entry.name.startsWith('layouts/') && entry.name !== 'layouts/version.json') {
+            layoutNames.push(entry.name);
+            return false;
+          }
+          return true;
+        },
+      });
+      if (!entries['catalog.json'] && !entries['layouts/version.json']) throw new Error('catalog.json がありません。ライブラリのZIPを選んでください。');
+      const notes: string[] = [];
+      if (entries['catalog.json']) {
+        const catalog = JSON.parse(new TextDecoder().decode(entries['catalog.json'])) as Catalog;
+        const pdfs = new Map(Object.entries(entries).filter(([name]) => name.endsWith('.pdf')));
+        await saveLibrary(catalog, pdfs, (done, total) => setMessage(`保存しています… ${done}/${total}`));
+        notes.push(`${catalog.exams.length}回分を読み込みました。`);
+      }
+      // Macで作った切り分けデータ。アプリの解析方法の版と同じときだけ使う(違えば問題を開くときに端末で解析する)。
+      if (entries['layouts/version.json']) {
+        const { version } = JSON.parse(new TextDecoder().decode(entries['layouts/version.json'])) as { version: string };
+        if (version === LAYOUT_VERSION) {
+          let saved = 0;
+          for (const name of layoutNames) {
+            setMessage(`切り分けデータを保存しています… ${saved + 1}/${layoutNames.length}`);
+            const one = unzipSync(bytes, { filter: (entry) => entry.name === name })[name];
+            const layout = JSON.parse(new TextDecoder().decode(one)) as DocLayout;
+            saved += await saveLayouts({ [name.slice('layouts/'.length, -'.json'.length)]: layout });
+          }
+          notes.push(`切り分けデータ(${saved}科目分)を読み込みました。`);
+        } else {
+          notes.push('切り分けデータはアプリの版と合わないため使いませんでした(問題を開くときに端末で解析します)。');
+        }
+      }
+      setMessage(notes.join(''));
       await refresh();
     } catch (error) {
       setMessage(`読み込めませんでした: ${(error as Error).message}`);

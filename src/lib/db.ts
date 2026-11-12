@@ -96,7 +96,9 @@ export async function getPdf(name: string): Promise<ArrayBuffer | null> {
 
 // ---- 表示用レイアウト(切り出し座標のみ。解析方法を変えたら版を上げる) ----
 
-const layoutKey = (file: string) => `layout-v160:${file}`;
+/** 解析方法の版。Macで作った切り分けデータ(layouts.json)も、この版が一致するときだけ使う。 */
+export const LAYOUT_VERSION = 'v161';
+const layoutKey = (file: string) => `layout-${LAYOUT_VERSION}:${file}`;
 
 export async function getLayout(file: string): Promise<DocLayout | null> {
   return ((await (await db()).get('meta', layoutKey(file))) as DocLayout | undefined) ?? null;
@@ -104,6 +106,19 @@ export async function getLayout(file: string): Promise<DocLayout | null> {
 
 export async function saveLayout(file: string, layout: DocLayout): Promise<void> {
   await (await db()).put('meta', layout, layoutKey(file));
+}
+
+/** Macで作った切り分けデータをまとめて保存する(端末ごとの描画の違いで切り分けが変わらないように)。 */
+export async function saveLayouts(layouts: Record<string, DocLayout>): Promise<number> {
+  const tx = (await db()).transaction('meta', 'readwrite');
+  let count = 0;
+  for (const [file, layout] of Object.entries(layouts)) {
+    if (!layout?.ok) continue;
+    await tx.store.put(layout, layoutKey(file));
+    count += 1;
+  }
+  await tx.done;
+  return count;
 }
 
 // ---- 正答 ----

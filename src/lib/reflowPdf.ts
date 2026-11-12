@@ -1,0 +1,100 @@
+import * as pdfjs from 'pdfjs-dist';
+import type { PDFDocumentProxy } from 'pdfjs-dist';
+import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
+import { analyzeDocument, docMetrics, emptyRowAbove, findBands, findLabelStarts, refineBands, type DocLayout, type Ink, type PageBands } from './reflow';
+
+pdfjs.GlobalWorkerOptions.workerSrc = workerUrl;
+
+/** 解析用の描画幅(px)。切り出し座標はすべてこの幅が基準。 */
+export const ANALYSIS_WIDTH = 1200;
+const INK_THRESHOLD = 170;
+const MERGE_GAP = 4;
+
+export function openPdf(data: ArrayBuffer): { promise: Promise<PDFDocumentProxy>; destroy: () => void } {
+  const base = new URL('pdfjs/', document.baseURI).href;
+  const task = pdfjs.getDocument({
+    data: new Uint8Array(data.slice(0)),
+    cMapUrl: `${base}cmaps/`,
+    cMapPacked: true,
+    standardFontDataUrl: `${base}standard_fonts/`,
+    isEvalSupported: false,
+  });
+  return { promise: task.promise, destroy: () => void task.destroy() };
+}
+
+export async function renderPage(doc: PDFDocumentProxy, number: number, width: number): Promise<HTMLCanvasElement> {
+  const page = await doc.getPage(number);
+  const scale = width / page.getViewport({ scale: 1 }).width;
+  const viewport = page.getViewport({ scale });
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.round(viewport.width);
+  canvas.height = Math.round(viewport.height);
+  const context = canvas.getContext('2d', { willReadFrequently: true });
+  if (!context) throw new Error('canvasを作成できません');
+  context.fillStyle = '#fff';
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  // 画面に直接出さない描画なので、画面の更新(requestAnimationFrame)に合わせない(背景のタブなどで大きく遅くなるため)。
+  await page.render({ canvasContext: context, viewport, intent: 'print' }).promise;
+  page.cleanup();
+  return canvas;
+}
+
+function toInk(canvas: HTMLCanvasElement): Ink {
+  const { width, height } = canvas;
+  const rgba = canvas.getContext('2d')!.getImageData(0, 0, width, height).data;
+  const data = new Uint8Array(width * height);
+  for (let i = 0; i < data.length; i++) {
+    const p = i * 4;
+    data[i] = (rgba[p] + rgba[p + 1] + rgba[p + 2]) / 3 < INK_THRESHOLD ? 1 : 0;
+  }
+  return { width, height, data };
+}
+
+export async function analyzePdf(
+  doc: PDFDocumentProxy,
+  expected: number,
+  onProgress?: (done: number, total: number) => void,
+): Promise<DocLayout> {
+  const pages: PageBands[] = [];
+  const inks: Ink[] = [];
+  for (let number = 1; number <= doc.numPages; number++) {
+    const canvas = await renderPage(doc, number, ANALYSIS_WIDTH);
+    const ink = toInk(canvas);
+    inks.push(ink);
+    pages.push({ page: number, width: ink.width, height: ink.height, bands: findBands(ink, MERGE_GAP) });
+    canvas.width = 0;
+    canvas.height = 0;
+    onProgress?.(number, doc.numPages);
+  }
+  // 行間の狭い文書で、つながった本文行を分け直す。
+  const estimate = docMetrics(pages, expected);
+  if (estimate) {
+    pages.forEach((page, index) => {
+      page.bands = refineBands(inks[index], page.bands, estimate.textHeight);
+    });
+  }
+  const first = analyzeDocument(pages, expected);
+  if (first.ok) return first;
+
+  // 行の形だけで数が合わなければ、問題番号の字の形で先頭を探し直す。
+  const metrics = docMetrics(pages, expected);
+  if (!metrics) return first;
+  const starts = findLabelStarts(pages, inks, metrics);
+  if (starts.length !== expected) return { ...first, found: starts.length || first.found };
+  const split = pages.map((page, index) => ({
+    ...page,
+    bands: refineBands(
+      inks[index],
+      findBands(
+        inks[index],
+        MERGE_GAP,
+        starts
+          .filter((start) => start.page === page.page)
+          .map((start) => emptyRowAbove(inks[index], start.top, metrics.textHeight))
+          .filter((row): row is number => row !== null),
+      ),
+      metrics.textHeight,
+    ),
+  }));
+  return analyzeDocument(split, expected, starts);
+}

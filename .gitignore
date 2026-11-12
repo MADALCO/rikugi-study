@@ -1,0 +1,10 @@
+node_modules/
+dist/
+dev-dist/
+public/pdfjs/
+.DS_Store
+
+# 過去問PDFは日本無線協会の著作物のため、リポジトリには含めず公開もしない
+pdfs/
+rikugi-library.zip
+scratch-debug/

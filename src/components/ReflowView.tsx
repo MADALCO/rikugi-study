@@ -286,7 +286,7 @@ export const ReflowView = memo(function ReflowView({ data, file, subject, questi
       <div className="reflow-wrap">
         <PdfView data={data} initialPage={firstPage ?? fallbackPage ?? 1} onPageChange={onPageChange} />
         {!unavailable && (
-          <div className="reflow-tools">
+          <div className="reflow-tools reflow-tools-left">
             <button type="button" className="reflow-btn" onClick={() => setOriginal(false)}>
               見やすい表示
             </button>

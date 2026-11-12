@@ -2449,6 +2449,40 @@ export function analyzeDocument(pages: PageBands[], expected: number, forced?: L
       items.splice(j, 0, aside);
       i = j;
     }
+    // 横に並ぶ図の下端で表が上下に分かれ、間に図が入った場合(選択肢の1〜4行目と5行目など)は、表をまとめて図を後ろに置く。
+    for (let i = 0; i < items.length; i++) {
+      const table = items[i];
+      if (table.kind !== 'block' || table.figure) continue;
+      let k = i + 1;
+      const beside = (item: Item) =>
+        item.kind === 'block' && item.figure && item.page === table.page && (item.left >= table.right - textHeight * 0.5 || item.right <= table.left + textHeight * 0.5);
+      while (k < items.length && beside(items[k])) k += 1;
+      const next = items[k];
+      if (
+        k === i + 1 ||
+        next?.kind !== 'block' ||
+        next.figure ||
+        next.page !== table.page ||
+        next.top < table.bottom - textHeight * 0.5 ||
+        next.top - table.bottom > textHeight * 2 ||
+        Math.min(next.right, table.right) - Math.max(next.left, table.left) < Math.min(next.right - next.left, table.right - table.left) * 0.6
+      ) {
+        continue;
+      }
+      // まとめた範囲が間の図に重なるなら、図が二重に写るのでまとめない。
+      const left = Math.min(table.left, next.left);
+      const right = Math.max(table.right, next.right);
+      const overlapsFigure = items
+        .slice(i + 1, k)
+        .some((item) => item.kind === 'block' && item.left < right - 2 && left + 2 < item.right && item.top < next.bottom - 2 && table.top + 2 < item.bottom);
+      if (overlapsFigure) continue;
+      table.left = Math.min(table.left, next.left);
+      table.right = Math.max(table.right, next.right);
+      table.bottom = Math.max(table.bottom, next.bottom);
+      if (table.masks || next.masks) table.masks = [...(table.masks ?? []), ...(next.masks ?? [])];
+      items.splice(k, 1);
+      i -= 1;
+    }
     // 行の右から切り離した図のラベル(小さなブロック)は、文の途中に割り込まないよう、同じページの図の直前へ移す。
     for (let i = 0; i < items.length; i++) {
       const label = items[i];

@@ -568,6 +568,12 @@ a.cell:hover {
   border-radius: 10px;
 }
 
+/* 原本表示では右下にページ番号と拡大縮小があるので、左下に置く。 */
+.reflow-tools-left {
+  right: auto;
+  left: 10px;
+}
+
 .reflow-btn {
   height: 40px;
   padding: 0 12px;

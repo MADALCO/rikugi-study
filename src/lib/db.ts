@@ -96,7 +96,7 @@ export async function getPdf(name: string): Promise<ArrayBuffer | null> {
 
 // ---- 表示用レイアウト(切り出し座標のみ。解析方法を変えたら版を上げる) ----
 
-const layoutKey = (file: string) => `layout-v156:${file}`;
+const layoutKey = (file: string) => `layout-v157:${file}`;
 
 export async function getLayout(file: string): Promise<DocLayout | null> {
   return ((await (await db()).get('meta', layoutKey(file))) as DocLayout | undefined) ?? null;

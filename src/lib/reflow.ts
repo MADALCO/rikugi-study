@@ -937,7 +937,112 @@ export function refineBands(ink: Ink, bands: Band[], textHeight: number): Band[]
       result.push(...peeled.below);
     }
   }
-  return splitRowAlignedTable(ink, mergeFractionRows(result, textHeight), textHeight);
+  // 凡例を図に移したあとに残る小さな切れ端(根号の上の線など)は、分子の行と同じく次の行へまとめる。
+  return splitRowAlignedTable(ink, mergeFractionRows(absorbFigureLabels(ink, result, textHeight), textHeight), textHeight);
+}
+
+/**
+ * 図のすぐ左にある短い字のまとまり(「V:直流電圧〔V〕」のような凡例)は、図に含める。
+ * 選択肢の行の右端に並んでいても、本文側より図の方がはっきり近い(間が半分以下)ときだけ切り離す。
+ */
+function absorbFigureLabels(ink: Ink, bands: Band[], textHeight: number): Band[] {
+  const W = ink.width;
+  const figures = bands.filter((band) => band.figure);
+  // 凡例を除いた残り。何行かがつながった帯(凡例が行の間にまたがっていた)なら、行ごとに分け直す。
+  const remainder = (band: Band, atoms: Atom[], right: number): Band[] => {
+    const rest = { ...band, atoms, right };
+    if (band.bottom - band.top <= textHeight * 1.8) return [rest];
+    const lines = componentLines(ink, band.top, band.bottom, band.left, right + 1, textHeight);
+    if (!lines || lines.length < 2 || !lines.every((line) => line.bottom - line.top <= textHeight * 1.8)) return [rest];
+    return lines.map((line) => ({
+      ...line,
+      ...(band.limit !== undefined && { limit: band.limit }),
+      ...(band.columnLeft !== undefined && { columnLeft: band.columnLeft }),
+    }));
+  };
+  if (figures.length === 0) return bands;
+  const out: Band[] = [];
+  // ページ下端の試験記号(最後の短い帯)は図に含めない(問題の区切りの判定で使う)。
+  const last = bands[bands.length - 1];
+  for (const band of bands) {
+    const footer =
+      band === last &&
+      band.right - band.left < W * 0.25 &&
+      band.top > ink.height * 0.85 &&
+      (band.left > W * 0.5 || (Math.abs((band.left + band.right) / 2 - W / 2) < W * 0.06 && band.right - band.left < W * 0.1));
+    if (footer || band.figure || band.mask || band.masks || band.bottom - band.top > textHeight * 4.5 || band.atoms.length === 0) {
+      out.push(band);
+      continue;
+    }
+    // 図の真下や真上の列にある字(目盛りの説明・凡例・図の番号など)が、左の選択肢の行と同じ高さに並んでいる場合。
+    const under = figures.find(
+      (candidate) =>
+        band.top < candidate.bottom + textHeight * 3 &&
+        band.bottom > candidate.top - textHeight * 1.5 &&
+        band.right > candidate.left &&
+        band.right <= candidate.right + textHeight * 2,
+    );
+    if (under) {
+      const split = band.atoms.findIndex((atom) => atom.x0 >= under.left - textHeight);
+      const group = split >= 0 ? band.atoms.slice(split) : [];
+      const clean =
+        group.length > 0 &&
+        (split === 0 ? group[0].x0 >= W * 0.35 : group[0].x0 - band.atoms[split - 1].x1 >= textHeight * 2) &&
+        band.atoms.slice(0, split).every((atom) => atom.x1 <= under.left);
+      const alignedUnder = clean
+        ? bands.filter(
+            (other) =>
+              !other.figure &&
+              other.bottom > under.top - textHeight * 4 &&
+              other.top < under.bottom + textHeight * 4 &&
+              other.atoms.some((atom, j) => Math.abs(atom.x0 - group[0].x0) <= textHeight && (j === 0 || atom.x0 - other.atoms[j - 1].x1 >= textHeight * 2)),
+          ).length
+        : 0;
+      if (clean && alignedUnder <= 3) {
+        under.left = Math.min(under.left, group[0].x0);
+        under.right = Math.max(under.right, group[group.length - 1].x1);
+        under.top = Math.min(under.top, band.top);
+        under.bottom = Math.max(under.bottom, band.bottom);
+        if (split > 0) out.push(...remainder(band, band.atoms.slice(0, split), band.atoms[split - 1].x1));
+        continue;
+      }
+    }
+    const figure = figures.find(
+      (candidate) =>
+        band.top < candidate.bottom + textHeight * 0.5 &&
+        band.bottom > candidate.top - textHeight * 0.5 &&
+        band.right <= candidate.right &&
+        candidate.left - band.right <= textHeight * 6,
+    );
+    if (!figure) {
+      out.push(band);
+      continue;
+    }
+    const atoms = band.atoms;
+    let start = atoms.length - 1;
+    while (start > 0 && atoms[start].x0 - atoms[start - 1].x1 <= textHeight) start -= 1;
+    const labelLeft = atoms[start].x0;
+    const gapToFigure = figure.left - band.right;
+    const separated = start === 0 ? labelLeft >= W * 0.35 && gapToFigure <= textHeight * 3 : labelLeft - atoms[start - 1].x1 >= Math.max(textHeight * 3, gapToFigure * 1.8);
+    // 表の列(同じ位置から始まる字が何行も並ぶ)は凡例ではない。
+    // 図の上下近くの行で、大きな空白のあとに同じ位置から始まる字を数える。
+    const aligned = bands.filter(
+      (other) =>
+        !other.figure &&
+        other.bottom > figure.top - textHeight * 4 &&
+        other.top < figure.bottom + textHeight * 4 &&
+        other.atoms.some((atom, j) => Math.abs(atom.x0 - labelLeft) <= textHeight && (j === 0 || atom.x0 - other.atoms[j - 1].x1 >= textHeight * 2)),
+    ).length;
+    if (band.right - labelLeft > textHeight * 10 || !separated || aligned > 3) {
+      out.push(band);
+      continue;
+    }
+    figure.left = Math.min(figure.left, labelLeft);
+    figure.top = Math.min(figure.top, band.top);
+    figure.bottom = Math.max(figure.bottom, band.bottom);
+    if (start > 0) out.push(...remainder(band, atoms.slice(0, start), atoms[start - 1].x1));
+  }
+  return out;
 }
 
 /**
@@ -1296,6 +1401,8 @@ function mergeFractionRows(lines: Band[], textHeight: number): Band[] {
       // 小さな行: 高さが行の0.8倍以下で6文字分以下、または間の空いた少数の記号(分子が並ぶ行など。高さは行の1.1倍まで)。
       !(
         (small.bottom - small.top <= textHeight * 0.8 && small.right - small.left <= textHeight * 6) ||
+        // 根号の上の線などの短い切れ端(すぐ下の行に接している)。
+        (small.atoms.length <= 3 && small.right - small.left <= textHeight * 4 && small.bottom - small.top <= textHeight * 1.25) ||
         (small.atoms.length <= 8 &&
           small.bottom - small.top <= textHeight * 1.1 &&
           (!isDenseLine(small, textHeight) || small.atoms.every((atom) => atom.x1 - atom.x0 <= textHeight * 2)))
@@ -1518,7 +1625,6 @@ export function componentFigureSplit(ink: Ink, top: number, bottom: number, text
   if (!found) return null;
   const lines = mergeFractionRows(found, textHeight);
   const proseLines = lines.filter((line) => isDenseLine(line, textHeight) && line.right - line.left >= textHeight * 8);
-  if (proseLines.length < 2) return null;
   // 図のブロックの範囲と、その範囲に入る本文の字を白く塗る範囲。
   const figureBoxes = boxes.filter((_, id) => inFigure[id]);
   const figure = {
@@ -1527,6 +1633,16 @@ export function componentFigureSplit(ink: Ink, top: number, bottom: number, text
     top: top + Math.min(...figureBoxes.map((box) => box.y0)),
     bottom: top + Math.max(...figureBoxes.map((box) => box.y1)),
   };
+  if (proseLines.length < 2) {
+    // 図の左が文章でなく選択肢の表などの場合も、左の段が図からはっきり離れた行の並びなら分ける(表と図を1枚にしない)。
+    const column =
+      lines.length >= 2 &&
+      lines.every((line) => line.bottom - line.top <= textHeight * 1.8 && line.right <= figure.left - textHeight) &&
+      Math.min(...lines.map((line) => line.left)) <= W * 0.3 &&
+      figure.right - figure.left >= textHeight * 6 &&
+      figure.bottom - figure.top >= textHeight * 3;
+    if (!column) return null;
+  }
   const masks: Mask[] = [];
   for (const line of lines) {
     for (const atom of line.atoms) {
@@ -2136,7 +2252,12 @@ export function analyzeDocument(pages: PageBands[], expected: number, forced?: L
   const collected: Array<Array<{ page: number; band: Band }>> = [];
   for (const page of pages) {
     const last = page.bands[page.bands.length - 1];
-    const isFooter = (band: Band) => band === last && band.right - band.left < W * 0.25 && band.top > page.height * 0.85;
+    // ページ下端の試験記号は右寄せ(ページ番号なら中央)。左から始まる短い行は本文の最後の行なので捨てない。
+    const isFooter = (band: Band) =>
+      band === last &&
+      band.right - band.left < W * 0.25 &&
+      band.top > page.height * 0.85 &&
+      (band.left > W * 0.5 || (Math.abs((band.left + band.right) / 2 - W / 2) < W * 0.06 && band.right - band.left < W * 0.1));
     for (const band of page.bands) {
       if (isStart(band, collected.length > 0, page.page)) collected.push([]);
       if (collected.length > 0 && !isFooter(band)) collected[collected.length - 1].push({ page: page.page, band });
@@ -2210,7 +2331,12 @@ export function analyzeDocument(pages: PageBands[], expected: number, forced?: L
         band.left >= previousFull.left - W * 0.03;
       // 表の切れ端(aside)は後で文章の後ろへ移すので、段落のつながりを判断するときは飛ばす。
       let currentIndex = items.length - 1;
-      while (currentIndex >= 0 && items[currentIndex].kind === 'block' && (items[currentIndex] as { aside?: boolean }).aside) currentIndex -= 1;
+      // 図の横の段の行が右端まで届いていれば、図の下の行はその段落の続きなので、間の図(横に並ぶもの)も飛ばしてつなげる(図は段落の後ろに残る)。
+      const skippable = (item: Item) =>
+        item.kind === 'block' &&
+        (item.aside ||
+          (item.figure === true && previousFull !== null && item.page === page && item.top < previousFull.bottom + textHeight && item.left >= previousFull.right - textHeight * 0.5));
+      while (currentIndex >= 0 && skippable(items[currentIndex])) currentIndex -= 1;
       const current = items[currentIndex];
 
 
@@ -2449,39 +2575,90 @@ export function analyzeDocument(pages: PageBands[], expected: number, forced?: L
       items.splice(j, 0, aside);
       i = j;
     }
-    // 横に並ぶ図の下端で表が上下に分かれ、間に図が入った場合(選択肢の1〜4行目と5行目など)は、表をまとめて図を後ろに置く。
+    // 横に並ぶ図の下端で表や段が上下に分かれ、間に図が入った場合(選択肢の1〜4行目と5行目など)は、続きを図の前へ移す。
+    // 表どうしは1つにまとめる(まとめた範囲が図に重なるときは並べるだけにする)。
+    type Span = { page: number; left: number; right: number; top: number; bottom: number; firstLeft: number; firstTop: number };
+    const spanOf = (item: Item, figureTop: number): Span | null => {
+      if (item.kind === 'block') return { page: item.page, left: item.left, right: item.right, top: item.top, bottom: item.bottom, firstLeft: item.left, firstTop: item.top };
+      const fragments = item.fragments;
+      const last = fragments[fragments.length - 1];
+      const page = last.page;
+      const onPage = fragments.filter((fragment) => fragment.page === page);
+      // 図の横にかかる行の右端(図より上の長い行は含めない)。
+      const beside = onPage.filter((fragment) => fragment.bottom > figureTop);
+      const rest = onPage.filter((fragment) => fragment.top >= onPage[0].top + textHeight * 0.5);
+      return {
+        page,
+        left: Math.min(...(rest.length > 0 ? rest : onPage).map((fragment) => fragment.x0)),
+        right: Math.max(...(beside.length > 0 ? beside : [last]).map((fragment) => fragment.x1)),
+        top: Math.min(...onPage.map((fragment) => fragment.top)),
+        bottom: Math.max(...onPage.map((fragment) => fragment.bottom)),
+        firstLeft: fragments[0].x0,
+        firstTop: fragments[0].top,
+      };
+    };
+    const joinedTop = new Map<Item, number>();
     for (let i = 0; i < items.length; i++) {
-      const table = items[i];
-      if (table.kind !== 'block' || table.figure) continue;
+      const head = items[i];
+      if (head.kind === 'block' && head.figure) continue;
+      const first = items[i + 1];
+      if (first?.kind !== 'block' || !first.figure) continue;
+      const span = spanOf(head, first.top);
+      if (!span || span.page !== first.page) continue;
       let k = i + 1;
       const beside = (item: Item) =>
-        item.kind === 'block' && item.figure && item.page === table.page && (item.left >= table.right - textHeight * 0.5 || item.right <= table.left + textHeight * 0.5);
+        item.kind === 'block' && item.figure === true && item.page === span.page && (item.left >= span.right - textHeight * 0.5 || item.right <= span.left + textHeight * 0.5);
       while (k < items.length && beside(items[k])) k += 1;
       const next = items[k];
+      if (k === i + 1 || !next || (next.kind === 'block' && next.figure)) continue;
+      const figures = items.slice(i + 1, k) as Array<Extract<Item, { kind: 'block' }>>;
+      const nextSpan = spanOf(next, first.top);
+      if (!nextSpan || (next.kind === 'text' && next.fragments[0].page !== span.page) || nextSpan.page !== span.page) continue;
+      const gap = nextSpan.firstTop - span.bottom;
+      const blocks = head.kind === 'block' && next.kind === 'block';
       if (
-        k === i + 1 ||
-        next?.kind !== 'block' ||
-        next.figure ||
-        next.page !== table.page ||
-        next.top < table.bottom - textHeight * 0.5 ||
-        next.top - table.bottom > textHeight * 2 ||
-        Math.min(next.right, table.right) - Math.max(next.left, table.left) < Math.min(next.right - next.left, table.right - table.left) * 0.6
+        gap < -textHeight * 0.5 ||
+        gap > textHeight * (next.kind === 'block' ? 2 : 1.2) ||
+        Math.abs(nextSpan.firstLeft - span.left) > textHeight * 1.5 ||
+        // 図の横(またはすぐ下)から始まる要素の続きだけを移す(図から離れた段落を次々に図の前へ移さない)。
+        (joinedTop.get(head) ?? span.top) > Math.max(...figures.map((figure) => figure.bottom)) + textHeight * 2 ||
+        (blocks && Math.min(nextSpan.right, span.right) - Math.max(nextSpan.left, span.left) < Math.min(nextSpan.right - nextSpan.left, span.right - span.left) * 0.6)
       ) {
         continue;
       }
-      // まとめた範囲が間の図に重なるなら、図が二重に写るのでまとめない。
-      const left = Math.min(table.left, next.left);
-      const right = Math.max(table.right, next.right);
-      const overlapsFigure = items
-        .slice(i + 1, k)
-        .some((item) => item.kind === 'block' && item.left < right - 2 && left + 2 < item.right && item.top < next.bottom - 2 && table.top + 2 < item.bottom);
-      if (overlapsFigure) continue;
-      table.left = Math.min(table.left, next.left);
-      table.right = Math.max(table.right, next.right);
-      table.bottom = Math.max(table.bottom, next.bottom);
-      if (table.masks || next.masks) table.masks = [...(table.masks ?? []), ...(next.masks ?? [])];
+      const left = Math.min(span.left, nextSpan.left);
+      const right = Math.max(span.right, nextSpan.right);
+      const overlapsFigure = figures.some((item) => item.left < right - 2 && left + 2 < item.right && item.top < nextSpan.bottom - 2 && span.top + 2 < item.bottom);
+      // まとめた範囲に文章の字が入るなら、字が二重に写るのでまとめない。
+      const coversText = items.some(
+        (item) =>
+          item.kind === 'text' &&
+          item.fragments.some((fragment) => fragment.page === span.page && fragment.x0 < right - 2 && left + 2 < fragment.x1 && fragment.top < nextSpan.bottom - 2 && span.top + 2 < fragment.bottom),
+      );
+      if (head.kind === 'block' && next.kind === 'block' && !overlapsFigure && !coversText) {
+        head.left = left;
+        head.right = right;
+        head.bottom = Math.max(head.bottom, next.bottom);
+        if (head.masks || next.masks) head.masks = [...(head.masks ?? []), ...(next.masks ?? [])];
+        items.splice(k, 1);
+        i -= 1;
+        continue;
+      }
       items.splice(k, 1);
-      i -= 1;
+      // 図の横の段落の最後の行が段の右端まで届いていれば、図の下の行はその段落の続きなのでつなげる。
+      if (head.kind === 'text' && next.kind === 'text') {
+        const last = head.fragments[head.fragments.length - 1];
+        // 段の右端(図の手前)まで届いた行だけ(短い選択肢の行どうしはつなげない)。
+        const columnRight = Math.min(...figures.filter((figure) => figure.left >= span.left).map((figure) => figure.left));
+        if (last.x1 >= span.right - W * 0.02 && last.x1 >= columnRight - textHeight * 3 && Math.abs(nextSpan.firstLeft - span.left) <= textHeight) {
+          head.fragments.push(...next.fragments);
+          // つないだ行の位置で、さらに続きを移すかを判断する。
+          joinedTop.set(head, nextSpan.firstTop);
+          i -= 1;
+          continue;
+        }
+      }
+      items.splice(i + 1, 0, next);
     }
     // 行の右から切り離した図のラベル(小さなブロック)は、文の途中に割り込まないよう、同じページの図の直前へ移す。
     for (let i = 0; i < items.length; i++) {
@@ -2493,6 +2670,19 @@ export function analyzeDocument(pages: PageBands[], expected: number, forced?: L
       if (target < 0) continue;
       items.splice(i, 1);
       items.splice(target - 1, 0, label);
+    }
+    // どの経路で作ったブロックでも、文章として別に表示する字が範囲に入っていれば白く塗る(二重に写さない)。
+    for (const block of items) {
+      if (block.kind !== 'block') continue;
+      for (const item of items) {
+        if (item.kind !== 'text') continue;
+        for (const fragment of item.fragments) {
+          if (fragment.page !== block.page || fragment.x1 <= block.left || fragment.x0 >= block.right || fragment.bottom <= block.top || fragment.top >= block.bottom) continue;
+          const masks = block.masks ?? [];
+          if (masks.some((mask) => mask.left <= fragment.x0 && mask.right >= fragment.x1 && mask.top <= fragment.top && mask.bottom >= fragment.bottom)) continue;
+          block.masks = [...masks, { top: fragment.top, bottom: fragment.bottom, left: fragment.x0, right: fragment.x1 }];
+        }
+      }
     }
     return items;
   });

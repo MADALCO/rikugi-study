@@ -112,6 +112,13 @@ describe('問題の分割', () => {
     expect(texts).toHaveLength(0);
   });
 
+  it('ページ下端の短い行でも、左から始まる行(本文の最後の行)は試験記号として捨てない', () => {
+    const layout = analyzeDocument([page([band(L, R, 100), band(90, R, 130), band(90, 300, 1300)])], 1);
+    expect(layout.ok).toBe(true);
+    const bottoms = layout.questions[0].flatMap((item) => (item.kind === 'text' ? item.fragments.map((fragment) => fragment.bottom) : [item.bottom]));
+    expect(Math.max(...bottoms)).toBe(1320);
+  });
+
   it('表の行(列の間に大きな空白がある行)は折り返さず、続きをひとつのブロックにまとめる', () => {
     const row = (top: number): Band => ({
       left: 120,

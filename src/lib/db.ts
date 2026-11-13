@@ -97,7 +97,7 @@ export async function getPdf(name: string): Promise<ArrayBuffer | null> {
 // ---- 表示用レイアウト(切り出し座標のみ。解析方法を変えたら版を上げる) ----
 
 /** 解析方法の版。Macで作った切り分けデータ(layouts.json)も、この版が一致するときだけ使う。 */
-export const LAYOUT_VERSION = 'v164';
+export const LAYOUT_VERSION = 'v165';
 const layoutKey = (file: string) => `layout-${LAYOUT_VERSION}:${file}`;
 
 export async function getLayout(file: string): Promise<DocLayout | null> {

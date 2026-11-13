@@ -1014,7 +1014,8 @@ function absorbFigureLabels(ink: Ink, bands: Band[], textHeight: number): Band[]
       continue;
     }
     // 図の真下や真上の列にある字(目盛りの説明・凡例・図の番号など)が、左の選択肢の行と同じ高さに並んでいる場合。
-    const under = figures.find(
+    // (何行かがつながった帯は、本文の行のことが多いので対象にしない。)
+    const under = band.bottom - band.top > textHeight * 1.8 ? undefined : figures.find(
       (candidate) =>
         band.top < candidate.bottom + textHeight * 3 &&
         band.bottom > candidate.top - textHeight * 1.5 &&
@@ -1022,12 +1023,18 @@ function absorbFigureLabels(ink: Ink, bands: Band[], textHeight: number): Band[]
         band.right <= candidate.right + textHeight * 2,
     );
     if (under) {
-      const split = band.atoms.findIndex((atom) => atom.x0 >= under.left - textHeight);
+      // 図の上・下の列にかかる部分を、行の中の一番右の大きな空白(字2個分以上)から切り離す(本文の途中では切らない)。
+      let split = band.atoms[0] && band.atoms[0].x0 >= under.left - textHeight ? 0 : -1;
+      band.atoms.forEach((atom, index) => {
+        if (index > 0 && atom.x0 >= under.left - textHeight && atom.x0 - band.atoms[index - 1].x1 >= textHeight * 2) split = index;
+      });
+      // 式の番号(「・・・・⑤」の⑤など)は点線で式とつながっているので、左の部分から字4個分以上離れているときだけ切り離す。
       const group = split >= 0 ? band.atoms.slice(split) : [];
       const clean =
         group.length > 0 &&
-        (split === 0 ? group[0].x0 >= W * 0.35 : group[0].x0 - band.atoms[split - 1].x1 >= textHeight * 2) &&
-        band.atoms.slice(0, split).every((atom) => atom.x1 <= under.left);
+        (split === 0 ? group[0].x0 >= W * 0.35 : group[0].x0 - band.atoms[split - 1].x1 >= textHeight * 4) &&
+        // 小さな点が3つ以上並ぶもの(式の点線「・・・・」)は図の説明ではない。
+        group.filter((atom) => atom.x1 - atom.x0 <= textHeight * 0.4).length < 3;
       const alignedUnder = clean
         ? bands.filter(
             (other) =>
@@ -1073,7 +1080,9 @@ function absorbFigureLabels(ink: Ink, bands: Band[], textHeight: number): Band[]
         other.top < figure.bottom + textHeight * 4 &&
         other.atoms.some((atom, j) => Math.abs(atom.x0 - labelLeft) <= textHeight && (j === 0 || atom.x0 - other.atoms[j - 1].x1 >= textHeight * 2)),
     ).length;
-    const kept = band.right - labelLeft > textHeight * 10 || !separated || aligned > 3 ? null : start > 0 ? remainder(band, atoms.slice(0, start), atoms[start - 1].x1) : [];
+    // 小さな点が3つ以上並ぶもの(式の点線「・・・・」と式の番号)は凡例ではない。
+    const leader = atoms.slice(start).filter((atom) => atom.x1 - atom.x0 <= textHeight * 0.4).length >= 3;
+    const kept = band.right - labelLeft > textHeight * 10 || !separated || aligned > 3 || leader ? null : start > 0 ? remainder(band, atoms.slice(0, start), atoms[start - 1].x1) : [];
     if (!kept) {
       out.push(band);
       continue;
@@ -1604,9 +1613,12 @@ export function regionFigureSplit(ink: Ink, top: number, bottom: number, textHei
     const where = sides[r];
     // 右寄りの図は、上に字4個分ほど離れた題や説明(「I_b:ベース電流」など)も候補にする(本文につながる字は後で除く)。
     if (box.y0 < region.top - (where === 'right' ? textHeight * 4 : pad) || box.y1 > region.bottom + pad) return false;
-    if (where === 'right') return box.x0 >= region.left - textHeight * 10;
+    // 字の点ほどの小さな墨のかけらは、元の図の範囲の外ではラベルにしない(本文の字の一部)。
+    const original = regions[r];
+    if (box.x1 - box.x0 <= 4 && box.y1 - box.y0 <= 4 && (box.x1 < original.left || box.x0 > original.right || box.y1 < original.top || box.y0 > original.bottom)) return false;
+    if (where === 'right') return box.x0 >= original.left - textHeight * 10;
     if (where === 'left') return box.x1 <= region.right + pad;
-    return box.x0 >= region.left - pad && box.x1 <= region.right + pad;
+    return box.x0 >= original.left - textHeight * 3 && box.x1 <= original.right + textHeight * 3;
   };
   // 図に含めた字の分だけ図の範囲を上下に広げ、図の下の「図1」や説明の行も順に含める。
   const grown = regions.map((region) => ({ ...region }));
@@ -1635,10 +1647,11 @@ export function regionFigureSplit(ink: Ink, top: number, bottom: number, textHei
       grown = false;
       page.forEach((other, j) => {
         if (j === id || owner[j] >= 0 || !rowOverlap(box, other)) return;
-        if (other.x1 >= x0 - textHeight && other.x1 <= x0 && other.x0 < x0) {
+        // 句読点の後などの空き(字1個分強)では行を切らない。
+        if (other.x1 >= x0 - textHeight * 1.5 && other.x1 <= x0 && other.x0 < x0) {
           x0 = other.x0;
           grown = true;
-        } else if (other.x0 <= x1 + textHeight && other.x0 >= x1 && other.x1 > x1) {
+        } else if (other.x0 <= x1 + textHeight * 1.5 && other.x0 >= x1 && other.x1 > x1) {
           x1 = other.x1;
           grown = true;
         }
@@ -1659,8 +1672,12 @@ export function regionFigureSplit(ink: Ink, top: number, bottom: number, textHei
       where === 'right' &&
       ((x1 <= region.left + textHeight && x0 >= region.left - textHeight * 10 && x0 - leftNeighbor >= Math.max(textHeight * 3, (region.left - x1) * 1.8)) ||
         (x1 > region.left + textHeight && x0 - leftNeighbor >= textHeight * 3));
+    // 図の外(上下)にある長い字の並び(字12個分超)は本文の行(幅いっぱいの図の真下の行など)。
+    const outside = box.y1 <= regions[r].top || box.y0 >= regions[r].bottom;
     const ok =
-      where === 'right'
+      outside && x1 - x0 > textHeight * 12
+        ? false
+        : where === 'right'
         ? x0 >= region.left - textHeight * 3 || (x0 >= region.left - textHeight * 10 && legend)
         : where === 'left'
           ? x1 <= region.right + textHeight * 3
@@ -1672,6 +1689,41 @@ export function regionFigureSplit(ink: Ink, top: number, bottom: number, textHei
   });
   if (!changed) break;
   extend();
+  }
+  // 図に含めた字(凡例など)にすぐ隣り合う字のかたまり(行の左端の記号・コロン・字の点)も、本文側の字から離れていれば図に含める。
+  for (let pass = 0; pass < 6; pass++) {
+    let changed = false;
+    page.forEach((box, id) => {
+      if (owner[id] >= 0) return;
+      // 隣り合う(字1.5個分以内)まだ図でない字のかたまり。
+      const chain = new Set([id]);
+      let x0 = box.x0;
+      let x1 = box.x1;
+      for (let grown = true; grown; ) {
+        grown = false;
+        page.forEach((other, j) => {
+          if (chain.has(j) || owner[j] >= 0 || !rowOverlap(box, other)) return;
+          if ((other.x1 <= x0 + 1 && x0 - other.x1 <= textHeight * 1.5) || (other.x0 >= x1 - 1 && other.x0 - x1 <= textHeight * 1.5)) {
+            chain.add(j);
+            x0 = Math.min(x0, other.x0);
+            x1 = Math.max(x1, other.x1);
+            grown = true;
+          }
+        });
+      }
+      let target = -1;
+      let leftGap = Infinity;
+      page.forEach((other, j) => {
+        if (chain.has(j) || !rowOverlap(box, other)) return;
+        if (owner[j] >= 0 && other.x0 - x1 >= -1 && other.x0 - x1 <= textHeight * 1.5 && sides[owner[j]] === 'right') target = owner[j];
+        if (owner[j] < 0 && other.x1 <= x0) leftGap = Math.min(leftGap, x0 - other.x1);
+      });
+      if (target >= 0 && leftGap >= textHeight * 3 && x0 >= regions[target].left - textHeight * 16 && x1 - x0 <= textHeight * 10) {
+        for (const j of chain) owner[j] = target;
+        changed = true;
+      }
+    });
+    if (!changed) break;
   }
   // 本文の墨。
   const text: Ink = { width: W, height: ink.height, data: new Uint8Array(ink.data.length) };
@@ -1699,7 +1751,10 @@ export function regionFigureSplit(ink: Ink, top: number, bottom: number, textHei
         again.flatMap((band) => {
           if (band.bottom - band.top <= textHeight * 1.8 || band.mask || band.masks) return [band];
           const pieces = rowPieces(text, band.top, band.bottom, band.left, band.right + 1, textHeight);
-          return pieces.length > 1 ? pieces.map((piece) => makeBandIn(text, piece.top, piece.bottom, band.left, band.right + 1)).filter((part) => part.atoms.length > 0) : [band];
+          if (pieces.length > 1) return pieces.map((piece) => makeBandIn(text, piece.top, piece.bottom, band.left, band.right + 1)).filter((part) => part.atoms.length > 0);
+          // 上下の空白で切れない(分数の式の行と次の行が接している)ときは、字ごとに行へ振り分ける。
+          const byComponents = componentLines(text, band.top, band.bottom, band.left, band.right + 1, textHeight);
+          return byComponents && byComponents.length > 1 && byComponents.every((part) => part.bottom - part.top <= textHeight * 3) ? byComponents : [band];
         }),
         textHeight,
       );
@@ -1725,11 +1780,17 @@ export function regionFigureSplit(ink: Ink, top: number, bottom: number, textHei
   });
   if (figures.length === 0) return null;
   // 図の左に並ぶ段の行には、段の右端(図の左端)を持たせる。
+  // 段の右端は、図のブロックの左端(左へ広げたラベルを含む)ではなく、図形そのものの左端で決める。
+  const cores = regions.map((region) => {
+    const parts = region.parts ?? [region];
+    return { left: Math.min(...parts.map((part) => part.left)), top: region.top, bottom: region.bottom };
+  });
   const columned = lines.map((line) => {
-    const right = figures.find((figure) => figure.top < line.bottom && line.top < figure.bottom && line.right <= figure.left);
+    // 図のすぐ上(字2.5個分以内)で図の手前で折り返している行も、図の横の段の行とする。
+    const right = cores.find((core) => core.top - textHeight * 2.5 < line.bottom && line.top < core.bottom + textHeight && line.right <= core.left);
     if (!right) return line;
-    const column = lines!.filter((other) => right.top < other.bottom && other.top < right.bottom && other.right <= right.left);
-    return { ...line, limit: right.left, columnLeft: Math.min(...column.map((other) => other.left)) };
+    const column = lines!.filter((other) => right.top - textHeight * 2.5 < other.bottom && other.top < right.bottom + textHeight && other.right <= right.left);
+    return { ...line, limit: Math.round(right.left), columnLeft: Math.min(...column.map((other) => other.left)) };
   });
   return [...columned, ...figures];
 }
@@ -2892,7 +2953,9 @@ export function analyzeDocument(pages: PageBands[], expected: number, forced?: L
       const onPage = fragments.filter((fragment) => fragment.page === page);
       // 図の横にかかる行の右端(図より上の長い行は含めない)。
       const beside = onPage.filter((fragment) => fragment.bottom > figureTop);
-      const rest = onPage.filter((fragment) => fragment.top >= onPage[0].top + textHeight * 0.5);
+      // 2行目以降の字(1行目の下付き文字は含めない)。
+      const firstLineBottom = Math.max(...onPage.filter((fragment) => fragment.top < onPage[0].top + textHeight * 0.5).map((fragment) => fragment.bottom));
+      const rest = onPage.filter((fragment) => fragment.top >= firstLineBottom - 2);
       return {
         page,
         left: Math.min(...(rest.length > 0 ? rest : onPage).map((fragment) => fragment.x0)),
@@ -2912,12 +2975,9 @@ export function analyzeDocument(pages: PageBands[], expected: number, forced?: L
       const span = spanOf(head, first.top);
       if (!span || span.page !== first.page) continue;
       let k = i + 1;
-      // 横に並ぶ図(または表の上にある図)。表や段落の続きの前に割り込んでいれば、続きを図の前へ移す。
-      const beside = (item: Item) =>
-        item.kind === 'block' &&
-        item.figure === true &&
-        item.page === span.page &&
-        (item.left >= span.right - textHeight * 0.5 || item.right <= span.left + textHeight * 0.5 || item.bottom <= span.top + textHeight * 0.5);
+      // 表や段落の続きが、間をほとんど空けずにすぐ下にあるなら、その間に図が縦にはさまる余地はない。
+      // 図の位置(横・上・表の範囲の中)にかかわらず、続きを図の前へ移す(続きかどうかは下で確かめる)。
+      const beside = (item: Item) => item.kind === 'block' && item.figure === true && item.page === span.page;
       while (k < items.length && beside(items[k])) k += 1;
       const next = items[k];
       if (k === i + 1 || !next || (next.kind === 'block' && next.figure)) continue;
@@ -2926,6 +2986,25 @@ export function analyzeDocument(pages: PageBands[], expected: number, forced?: L
       if (!nextSpan || (next.kind === 'text' && next.fragments[0].page !== span.page) || nextSpan.page !== span.page) continue;
       const gap = nextSpan.firstTop - span.bottom;
       const blocks = head.kind === 'block' && next.kind === 'block';
+      // 同じ段落の続き(段の右端まで届いた行の次の、字下げのない行)か。
+      const columnRight = Math.min(...figures.filter((figure) => figure.left >= span.left).map((figure) => figure.left));
+      const lastFragment = head.kind === 'text' ? head.fragments[head.fragments.length - 1] : null;
+      const sameParagraph =
+        head.kind === 'text' &&
+        next.kind === 'text' &&
+        lastFragment !== null &&
+        gap >= -textHeight * 0.5 &&
+        gap <= textHeight * 1.2 &&
+        lastFragment.x1 >= span.right - W * 0.02 &&
+        lastFragment.x1 >= columnRight - textHeight * 3 &&
+        Math.abs(nextSpan.firstLeft - span.left) <= textHeight;
+      if (sameParagraph) {
+        items.splice(k, 1);
+        head.fragments.push(...(next as Extract<Item, { kind: 'text' }>).fragments);
+        joinedTop.set(head, nextSpan.firstTop);
+        i -= 1;
+        continue;
+      }
       if (
         gap < -textHeight * 0.5 ||
         gap > textHeight * (next.kind === 'block' ? 2 : 1.2) ||
@@ -2955,19 +3034,6 @@ export function analyzeDocument(pages: PageBands[], expected: number, forced?: L
         continue;
       }
       items.splice(k, 1);
-      // 図の横の段落の最後の行が段の右端まで届いていれば、図の下の行はその段落の続きなのでつなげる。
-      if (head.kind === 'text' && next.kind === 'text') {
-        const last = head.fragments[head.fragments.length - 1];
-        // 段の右端(図の手前)まで届いた行だけ(短い選択肢の行どうしはつなげない)。
-        const columnRight = Math.min(...figures.filter((figure) => figure.left >= span.left).map((figure) => figure.left));
-        if (last.x1 >= span.right - W * 0.02 && last.x1 >= columnRight - textHeight * 3 && Math.abs(nextSpan.firstLeft - span.left) <= textHeight) {
-          head.fragments.push(...next.fragments);
-          // つないだ行の位置で、さらに続きを移すかを判断する。
-          joinedTop.set(head, nextSpan.firstTop);
-          i -= 1;
-          continue;
-        }
-      }
       items.splice(i + 1, 0, next);
     }
     // 行の右から切り離した図のラベル(小さなブロック)は、文の途中に割り込まないよう、同じページの図の直前へ移す。

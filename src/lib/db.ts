@@ -74,20 +74,20 @@ export async function getCatalog(): Promise<Catalog | null> {
   return ((await (await db()).get('meta', 'catalog')) as Catalog | undefined) ?? null;
 }
 
-export async function saveLibrary(
-  catalog: Catalog,
-  files: Map<string, Uint8Array>,
-  onProgress?: (done: number, total: number) => void,
-): Promise<void> {
-  const database = await db();
-  let done = 0;
-  for (const [name, bytes] of files) {
-    const copy = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
-    await database.put('pdfs', copy, name);
-    done += 1;
-    onProgress?.(done, files.size);
-  }
-  await database.put('meta', catalog, 'catalog');
+/** PDFを1つ保存する(ZIPから1つずつ取り出して保存し、メモリを使い過ぎないように)。 */
+export async function savePdf(name: string, bytes: Uint8Array): Promise<void> {
+  const copy = bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength ? (bytes.buffer as ArrayBuffer) : (bytes.slice().buffer as ArrayBuffer);
+  await (await db()).put('pdfs', copy, name);
+}
+
+/** 保存済みのPDFの名前。 */
+export async function pdfNames(): Promise<Set<string>> {
+  return new Set(await (await db()).getAllKeys('pdfs'));
+}
+
+/** 回の一覧を保存する(PDFをすべて保存し終えてから)。 */
+export async function saveCatalog(catalog: Catalog): Promise<void> {
+  await (await db()).put('meta', catalog, 'catalog');
 }
 
 export async function getPdf(name: string): Promise<ArrayBuffer | null> {

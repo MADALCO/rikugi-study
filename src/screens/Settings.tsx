@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
-import { unzipSync } from 'fflate';
-import { exportBackup, getCatalog, getLastBackupAt, importBackup, LAYOUT_VERSION, saveLayouts, saveLibrary, type Catalog } from '../lib/db';
+import { readZipEntry, readZipIndex } from '../lib/zipReader';
+import { exportBackup, getCatalog, getLastBackupAt, getPdf, importBackup, LAYOUT_VERSION, pdfNames, saveCatalog, saveLayouts, savePdf, type Catalog } from '../lib/db';
 import type { DocLayout } from '../lib/reflow';
 
 const isStandalone = () =>
@@ -8,6 +8,9 @@ const isStandalone = () =>
   (navigator as Navigator & { standalone?: boolean }).standalone === true;
 
 const formatDate = (time: number) => new Date(time).toLocaleDateString('ja-JP');
+
+/** 保存済みのPDFが、ZIPの中のものと同じ大きさか(途中で止まった読み込みのやり直しで、保存済みの分を飛ばすため)。 */
+const sameSize = async (name: string, size: number) => (await getPdf(name))?.byteLength === size;
 
 export function Settings() {
   const [message, setMessage] = useState<string | null>(null);
@@ -35,43 +38,47 @@ export function Settings() {
 
   const loadZip = async (file: File) => {
     setBusy(true);
-    setMessage('ZIPを展開しています…');
+    setMessage('ZIPを開いています…');
     try {
-      const bytes = new Uint8Array(await file.arrayBuffer());
-      // 切り分けデータ(科目ごとのファイル)は、iPhoneのメモリを使い過ぎないよう、あとで1つずつ展開する。
-      const layoutNames: string[] = [];
-      const entries = unzipSync(bytes, {
-        filter: (entry) => {
-          if (entry.name.startsWith('layouts/') && entry.name !== 'layouts/version.json') {
-            layoutNames.push(entry.name);
-            return false;
-          }
-          return true;
-        },
-      });
-      if (!entries['catalog.json'] && !entries['layouts/version.json']) throw new Error('catalog.json がありません。ライブラリのZIPを選んでください。');
+      // ZIPを丸ごと読み込まず、目次を読んでから中のファイルを1つずつ取り出して保存する
+      // (iPhone/iPadは大きなZIPを一度に展開するとメモリ不足でページが落ちるため)。
+      const index = await readZipIndex(file);
+      const byName = new Map(index.map((entry) => [entry.name, entry]));
+      const catalogEntry = byName.get('catalog.json');
+      const versionEntry = byName.get('layouts/version.json');
+      if (!catalogEntry && !versionEntry) throw new Error('catalog.json がありません。ライブラリのZIPを選んでください。');
+      const decode = async (name: string) => JSON.parse(new TextDecoder().decode(await readZipEntry(file, byName.get(name)!)));
       const notes: string[] = [];
-      if (entries['catalog.json']) {
-        const catalog = JSON.parse(new TextDecoder().decode(entries['catalog.json'])) as Catalog;
-        const pdfs = new Map(Object.entries(entries).filter(([name]) => name.endsWith('.pdf')));
-        await saveLibrary(catalog, pdfs, (done, total) => setMessage(`保存しています… ${done}/${total}`));
+      if (catalogEntry) {
+        const catalog = (await decode('catalog.json')) as Catalog;
+        const names = index.filter((entry) => entry.name.endsWith('.pdf'));
+        // 途中で止まった読み込みのやり直しでは、保存済みで大きさの同じPDFは飛ばす。
+        const stored = await pdfNames();
+        let done = 0;
+        for (const entry of names) {
+          setMessage(`PDFを保存しています… ${done + 1}/${names.length}`);
+          if (!stored.has(entry.name) || !(await sameSize(entry.name, entry.size))) await savePdf(entry.name, await readZipEntry(file, entry));
+          done += 1;
+        }
+        await saveCatalog(catalog);
         notes.push(`${catalog.exams.length}回分を読み込みました。`);
       }
       // Macで作った切り分けデータ。アプリの解析方法の版と同じときだけ使う(違えば問題を開くときに端末で解析する)。
-      if (entries['layouts/version.json']) {
-        const { version } = JSON.parse(new TextDecoder().decode(entries['layouts/version.json'])) as { version: string };
+      if (versionEntry) {
+        const { version } = (await decode('layouts/version.json')) as { version: string };
         if (version === LAYOUT_VERSION) {
+          const layouts = index.filter((entry) => entry.name.startsWith('layouts/') && entry.name !== 'layouts/version.json');
           let saved = 0;
-          for (const name of layoutNames) {
-            setMessage(`切り分けデータを保存しています… ${saved + 1}/${layoutNames.length}`);
-            const one = unzipSync(bytes, { filter: (entry) => entry.name === name })[name];
-            const layout = JSON.parse(new TextDecoder().decode(one)) as DocLayout;
-            saved += await saveLayouts({ [name.slice('layouts/'.length, -'.json'.length)]: layout });
+          for (const [k, entry] of layouts.entries()) {
+            setMessage(`切り分けデータを保存しています… ${k + 1}/${layouts.length}`);
+            const layout = (await decode(entry.name)) as DocLayout;
+            saved += await saveLayouts({ [entry.name.slice('layouts/'.length, -'.json'.length)]: layout });
           }
           notes.push(`切り分けデータ(${saved}科目分)を読み込みました。`);
         } else {
           notes.push('切り分けデータはアプリの版と合わないため使いませんでした(問題を開くときに端末で解析します)。');
         }
+        if (!catalogEntry && !(await getCatalog())) notes.push('過去問のPDFはまだありません。rikugi-library.zip を読み込んでください。');
       }
       setMessage(notes.join(''));
       await refresh();

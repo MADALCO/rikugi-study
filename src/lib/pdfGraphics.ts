@@ -233,7 +233,7 @@ export interface Region {
   right: number;
   bottom: number;
   /** 図を形づくる図形(線・面・画像)の矩形。図の線の墨を見分けるのに使う。 */
-  parts?: Region[];
+  parts?: Array<Region & { image?: boolean; rect?: boolean }>;
 }
 
 const near = (a: Region, b: Region, gap: number) =>
@@ -290,6 +290,9 @@ export function figureRegions(rects: GraphicRect[], textHeight: number, pageWidt
     // 細い線だけの少ないまとまり(式の大きな根号や括弧)は、上線が長くても図としない。
     const thin = (rect: GraphicRect) => rect.right - rect.left <= 3 || rect.bottom - rect.top <= 3 || (rect.right - rect.left <= textHeight * 1.2 && rect.bottom - rect.top <= textHeight * 1.2);
     if (!hasImage && group.members.length <= 8 && height <= textHeight * 4.5 && group.members.every(thin)) return false;
+    // 小さなまとまりで、細い線と字の高さほどの細い曲線(式の括弧・根号・分数の横棒)だけなら式。
+    const formulaPart = (rect: GraphicRect) => thin(rect) || (rect.right - rect.left <= textHeight * 1.2 && rect.bottom - rect.top <= textHeight * 3.2);
+    if (!hasImage && width <= textHeight * 10 && height <= textHeight * 5 && group.members.every(formulaPart)) return false;
     // 短い縦線(行の高さほど)と短い横線だけでできた低いまとまりは、上下の行の空欄の枠が接して並んだもの。
     const shortLines = group.members.every(
       (rect) =>
@@ -310,7 +313,7 @@ export function figureRegions(rects: GraphicRect[], textHeight: number, pageWidt
   // 図の本体に接する小さなまとまり(端子の記号の画像など)は図に含める。
   const small = groups.filter((group) => !isFigure(group));
   const merged = cluster(
-    figures.map((group) => ({ ...group.box, parts: group.members.map(({ left, top, right, bottom }) => ({ left, top, right, bottom })) })),
+    figures.map((group) => ({ ...group.box, parts: group.members.map(({ left, top, right, bottom, image, rect }) => ({ left, top, right, bottom, image, rect })) })),
     textHeight * 2.5,
   ).map((group) => {
     const box = { ...group.box };
@@ -323,7 +326,7 @@ export function figureRegions(rects: GraphicRect[], textHeight: number, pageWidt
       box.top = Math.min(box.top, extra.box.top);
       box.right = Math.max(box.right, extra.box.right);
       box.bottom = Math.max(box.bottom, extra.box.bottom);
-      parts.push(...extra.members.map(({ left, top, right, bottom }) => ({ left, top, right, bottom })));
+      parts.push(...extra.members.map(({ left, top, right, bottom, image, rect }) => ({ left, top, right, bottom, image, rect })));
     }
     return { left: Math.floor(box.left), top: Math.floor(box.top), right: Math.ceil(box.right), bottom: Math.ceil(box.bottom), parts } as Region;
   });

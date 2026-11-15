@@ -865,7 +865,19 @@ export function refineBands(ink: Ink, input: Band[], textHeight: number, known?:
       result.push(band);
       continue;
     }
-    for (const piece of rowPieces(ink, band.top, band.bottom, 0, W, textHeight)) {
+    const bandPieces = rowPieces(ink, band.top, band.bottom, 0, W, textHeight);
+    // 左の段の文章の横に表が並び、表が空白の行をまたいで続く場合は、空白の行で切らずに帯全体で左の段と表に分ける
+    // (表の見出しと1行目だけが上の部分に入り、本文の行とつながってしまうため)。
+    if (bandPieces.length > 1 && bandPieces.some((piece) => piece.bottom - piece.top > textHeight * 1.6)) {
+      const whole = tableBesideSplit(ink, band.top, band.bottom, textHeight);
+      const table = whole?.find((part) => part.figure);
+      const crosses = table && bandPieces.some((piece, index) => index > 0 && piece.top > table.top + textHeight && piece.top < table.bottom - textHeight);
+      if (whole && table && crosses && whole.every((part) => part.figure || part.bottom - part.top <= textHeight * 1.8)) {
+        result.push(...whole);
+        continue;
+      }
+    }
+    for (const piece of bandPieces) {
       if (piece.bottom - piece.top <= textHeight * 1.6) {
         result.push(makeBandIn(ink, piece.top, piece.bottom, 0, W));
         continue;
@@ -882,6 +894,14 @@ export function refineBands(ink: Ink, input: Band[], textHeight: number, known?:
           lines.every((line) => isDenseLine(line, textHeight) && line.bottom - line.top <= textHeight * 2.2)
         ) {
           result.push(...lines);
+          continue;
+        }
+      }
+      // 左の段の文章と右の表の間に上から下まで通る空白があれば、そこで分ける(行をはがす処理は字の途中で切ることがある)。
+      {
+        const beside = tableBesideSplit(ink, piece.top, piece.bottom, textHeight);
+        if (beside) {
+          result.push(...beside);
           continue;
         }
       }
@@ -990,8 +1010,10 @@ function absorbFigureLabels(ink: Ink, bands: Band[], textHeight: number): Band[]
     if (!lines || lines.length < 2 || !lines.every((line) => line.bottom - line.top <= limit)) {
       const pieces = rowPieces(ink, band.top, band.bottom, band.left, right + 1, textHeight);
       lines = pieces.length >= 2 ? pieces.map((piece) => makeBandIn(ink, piece.top, piece.bottom, band.left, right + 1)).filter((line) => line.atoms.length > 0) : null;
+      // 上下の空白で切った行は、分数を含む式の行(字の2.5倍ほど)も1行とする。
+      if (lines) lines = lines.every((line) => line.bottom - line.top <= Math.max(limit, textHeight * 2.5)) ? lines : null;
     }
-    const ok = lines && lines.length >= 2 && lines.every((line) => line.bottom - line.top <= limit);
+    const ok = lines && lines.length >= 2 && lines.every((line) => line.bottom - line.top <= Math.max(limit, textHeight * 2.5));
     if (!ok) return tall ? null : [rest];
     return lines!.map((line) => ({
       ...line,
@@ -1015,7 +1037,20 @@ function absorbFigureLabels(ink: Ink, bands: Band[], textHeight: number): Band[]
     }
     // 図の真下や真上の列にある字(目盛りの説明・凡例・図の番号など)が、左の選択肢の行と同じ高さに並んでいる場合。
     // (何行かがつながった帯は、本文の行のことが多いので対象にしない。)
-    const under = band.bottom - band.top > textHeight * 1.8 ? undefined : figures.find(
+    // すぐ下に、同じ列を覆う表の行(大きな空白で区切られた行)が続くなら、表の見出しで図の説明ではない。
+    const tableBelow = bands.some(
+      (other) =>
+        other !== band &&
+        !other.figure &&
+        other.top >= band.bottom - 2 &&
+        other.top - band.bottom <= textHeight * 1.5 &&
+        other.left <= band.left + textHeight &&
+        other.right >= band.right - textHeight &&
+        !isDenseLine(other, textHeight),
+    );
+    // 問題の書き出しの行(ページの左端から始まる行)の字は、上の(前の問題の)図の説明にしない。
+    const questionStart = band.left < W * 0.1;
+    const under = band.bottom - band.top > textHeight * 1.8 || tableBelow || questionStart ? undefined : figures.find(
       (candidate) =>
         band.top < candidate.bottom + textHeight * 3 &&
         band.bottom > candidate.top - textHeight * 1.5 &&
@@ -1030,7 +1065,11 @@ function absorbFigureLabels(ink: Ink, bands: Band[], textHeight: number): Band[]
       });
       // 式の番号(「・・・・⑤」の⑤など)は点線で式とつながっているので、左の部分から字4個分以上離れているときだけ切り離す。
       const group = split >= 0 ? band.atoms.slice(split) : [];
+      // 左の部分が大きな空白で何列にも分かれている行(選択肢の並び「1 … 2 … 3 …」)の最後の列は、選択肢で図の説明ではない。
+      const head = split > 0 ? band.atoms.slice(0, split) : [];
+      const columns = head.filter((atom, index) => index > 0 && atom.x0 - head[index - 1].x1 >= textHeight * 2).length;
       const clean =
+        columns < 2 &&
         group.length > 0 &&
         (split === 0 ? group[0].x0 >= W * 0.35 : group[0].x0 - band.atoms[split - 1].x1 >= textHeight * 4) &&
         // 小さな点が3つ以上並ぶもの(式の点線「・・・・」)は図の説明ではない。
@@ -1455,7 +1494,9 @@ function mergeFractionRows(lines: Band[], textHeight: number): Band[] {
         (small.atoms.length <= 3 && small.right - small.left <= textHeight * 4 && small.bottom - small.top <= textHeight * 1.25) ||
         (small.atoms.length <= 8 &&
           small.bottom - small.top <= textHeight * 1.1 &&
-          (!isDenseLine(small, textHeight) || small.atoms.every((atom) => atom.x1 - atom.x0 <= textHeight * 2)))
+          (!isDenseLine(small, textHeight) || small.atoms.every((atom) => atom.x1 - atom.x0 <= textHeight * 2)) &&
+          // 全角の字(かな・漢字)が詰まって並ぶ短い行は、段落の最後の行(「よって決まる。」など)で分子ではない。
+          !(isDenseLine(small, textHeight) && small.atoms.length >= 4 && small.atoms.filter((atom) => atom.x1 - atom.x0 >= textHeight * 0.75).length >= small.atoms.length * 0.6))
       ) ||
       next.top - small.bottom > 4 ||
       small.left < next.left ||
@@ -1519,7 +1560,7 @@ export interface FigureRegion {
   top: number;
   right: number;
   bottom: number;
-  parts?: Array<{ left: number; top: number; right: number; bottom: number }>;
+  parts?: Array<{ left: number; top: number; right: number; bottom: number; image?: boolean; rect?: boolean }>;
 }
 
 /**
@@ -1581,9 +1622,25 @@ export function regionFigureSplit(ink: Ink, top: number, bottom: number, textHei
   const rowOverlap = (a: { y0: number; y1: number }, b: { y0: number; y1: number }) => Math.min(a.y1, b.y1) - Math.max(a.y0, b.y0) >= Math.min(a.y1 - a.y0, b.y1 - b.y0) * 0.5;
   // 図形に重なっていても、図の外まで続く本文の行の字や空欄の枠は本文に戻す(透明な画像が本文に重なる場合や、行末の空欄の枠が図に接する場合)。
   const charLike = (box: { x0: number; x1: number; y0: number; y1: number }) => box.y1 - box.y0 <= textHeight * 2 && box.x1 - box.x0 <= textHeight * 8;
+  // 図の線(画像や長方形でない線・面)だけでちょうど描かれた墨(寸法線の矢印など)は、本文の字ではない。
+  // 空欄の枠(上下の辺が幅いっぱいに通る)は除く。
+  const drawnByLines = (box: { x0: number; x1: number; y0: number; y1: number }, region: FigureRegion) => {
+    const hits = (region.parts ?? []).filter((part) => overlaps(box, part, 1));
+    if (hits.length === 0 || hits.some((part) => part.image || part.rect)) return false;
+    if (!hits.every((part) => part.left >= box.x0 - 2 && part.right <= box.x1 + 2 && part.top >= box.y0 - 2 && part.bottom <= box.y1 + 2)) return false;
+    const spans = (y: number) => hits.some((part) => part.bottom - part.top <= 3 && Math.abs((part.top + part.bottom) / 2 - y) <= 3 && part.right - part.left >= (box.x1 - box.x0) * 0.8);
+    if (spans(box.y0) && spans(box.y1)) return false;
+    // 寸法線のように、細い線が墨の幅(または高さ)のほとんどを通るものだけ(線で描いた字の輪郭は除く)。
+    return hits.some(
+      (part) =>
+        (part.bottom - part.top <= 3 && part.right - part.left >= (box.x1 - box.x0) * 0.8) ||
+        (part.right - part.left <= 3 && part.bottom - part.top >= (box.y1 - box.y0) * 0.8),
+    );
+  };
   page.forEach((box, id) => {
     if (owner[id] < 0 || !charLike(box)) return;
     const region = regions[owner[id]];
+    if (drawnByLines(box, region)) return;
     let x0 = box.x0;
     let x1 = box.x1;
     let free = 0;
@@ -1605,7 +1662,8 @@ export function regionFigureSplit(ink: Ink, top: number, bottom: number, textHei
     if (free >= 3 && (x0 < region.left - textHeight * 3 || x1 > region.right + textHeight * 3)) owner[id] = -1;
   });
   // 図が右寄り(本文は左)なら図の右側の字(凡例など)も、左寄りなら図の左側の字もラベルの候補にする。
-  const side = (region: FigureRegion) => (region.left > W * 0.35 ? 'right' : region.right < W * 0.65 ? 'left' : 'center');
+  // 左寄りは、図がページの左端近くから始まる場合だけ(真ん中寄りの図の左には選択肢などの本文がある)。
+  const side = (region: FigureRegion) => (region.left > W * 0.35 ? 'right' : region.left < W * 0.2 && region.right < W * 0.65 ? 'left' : 'center');
   // 図の位置(右寄り・左寄り)は、元の図形の範囲で決める(ラベルで広げた範囲では変えない)。
   const sides = regions.map(side);
   const candidate = (box: { x0: number; x1: number; y0: number; y1: number }, region: FigureRegion, r: number) => {
@@ -1643,12 +1701,25 @@ export function regionFigureSplit(ink: Ink, top: number, bottom: number, textHei
     const region = grown[r];
     let x0 = box.x0;
     let x1 = box.x1;
+    // 並びの高さ。字の離れた部分(横棒など)から始めた場合は、同じ字のほかの部分で字の高さに広げる。
+    const row = { y0: box.y0, y1: box.y1 };
     for (let grown = true; grown; ) {
       grown = false;
       page.forEach((other, j) => {
-        if (j === id || owner[j] >= 0 || !rowOverlap(box, other)) return;
-        // 句読点の後などの空き(字1個分強)では行を切らない。
-        if (other.x1 >= x0 - textHeight * 1.5 && other.x1 <= x0 && other.x0 < x0) {
+        if (j === id || owner[j] >= 0) return;
+        // 横に重なり、上下に接する(または重なる)墨(空欄の枠とその中の字、1つの字の上下に離れた部分)は同じ並び。
+        const stacked = other.x1 > x0 && other.x0 < x1 && other.y0 <= row.y1 + 2 && row.y0 <= other.y1 + 2 && other.y1 - other.y0 <= textHeight * 1.5;
+        if (!stacked && !rowOverlap(row, other)) return;
+        if (other.x1 > x0 && other.x0 < x1 && (other.x0 < x0 || other.x1 > x1 || (stacked && (other.y0 < row.y0 || other.y1 > row.y1) && row.y1 - row.y0 < textHeight * 0.6))) {
+          x0 = Math.min(x0, other.x0);
+          x1 = Math.max(x1, other.x1);
+          if (row.y1 - row.y0 < textHeight * 0.6 && other.y1 - other.y0 <= textHeight * 1.5) {
+            row.y0 = Math.min(row.y0, other.y0);
+            row.y1 = Math.max(row.y1, other.y1);
+          }
+          grown = true;
+        } else if (other.x1 >= x0 - textHeight * 1.5 && other.x1 <= x0 && other.x0 < x0) {
+          // 句読点の後などの空き(字1個分強)では行を切らない。
           x0 = other.x0;
           grown = true;
         } else if (other.x0 <= x1 + textHeight * 1.5 && other.x0 >= x1 && other.x1 > x1) {
@@ -1672,10 +1743,12 @@ export function regionFigureSplit(ink: Ink, top: number, bottom: number, textHei
       where === 'right' &&
       ((x1 <= region.left + textHeight && x0 >= region.left - textHeight * 10 && x0 - leftNeighbor >= Math.max(textHeight * 3, (region.left - x1) * 1.8)) ||
         (x1 > region.left + textHeight && x0 - leftNeighbor >= textHeight * 3));
-    // 図の外(上下)にある長い字の並び(字12個分超)は本文の行(幅いっぱいの図の真下の行など)。
+    // 図の外(上下)にある字の並びは、長いもの(字12個分超)や、問題の書き出しの行(ページ左端の問題番号から始まる行)と
+    // 同じ高さのものは図のラベルにしない(本文の行の切れ端を取り込まない)。
     const outside = box.y1 <= regions[r].top || box.y0 >= regions[r].bottom;
+    const questionRow = outside && page.some((other, j) => owner[j] < 0 && other.x0 < W * 0.1 && rowOverlap(box, other));
     const ok =
-      outside && x1 - x0 > textHeight * 12
+      (outside && x1 - x0 > textHeight * 12) || questionRow
         ? false
         : where === 'right'
         ? x0 >= region.left - textHeight * 3 || (x0 >= region.left - textHeight * 10 && legend)
@@ -1792,7 +1865,16 @@ export function regionFigureSplit(ink: Ink, top: number, bottom: number, textHei
     const column = lines!.filter((other) => right.top - textHeight * 2.5 < other.bottom && other.top < right.bottom + textHeight && other.right <= right.left);
     return { ...line, limit: Math.round(right.left), columnLeft: Math.min(...column.map((other) => other.left)) };
   });
-  return [...columned, ...figures];
+  // 横に並ぶ行のない図(本文の上にある図)は、図より下の行の前に置く(図の下の本文が図より先に来ないように)。
+  // 横に行が並ぶ図は、その段の続きが図の下へ続くことがあるので、従来どおり行の後ろに置く。
+  const ordered: Band[] = [...columned];
+  for (const figure of figures) {
+    const beside = columned.some((line) => line.top < figure.bottom - 2 && line.bottom > figure.top + 2);
+    const below = beside ? -1 : ordered.findIndex((line) => !line.figure && line.top >= figure.bottom - 2);
+    if (below < 0) ordered.push(figure);
+    else ordered.splice(below, 0, figure);
+  }
+  return ordered;
 }
 
 /**
@@ -2656,13 +2738,34 @@ export function analyzeDocument(pages: PageBands[], expected: number, forced?: L
       if (band.limit === undefined || band.figure || !isDenseLine(band, textHeight)) continue;
       columnRights.set(band.limit, Math.max(columnRights.get(band.limit) ?? 0, band.right));
     }
+    // 項目の書き出しだけが左に出る(2行目以降が字下げされる)箇条書き「(1) …」の書き出しの位置。
+    // その位置から始まる行のすぐ下に、字1〜2個分右から始まる行が2回以上続くもの。
+    const hangLefts: number[] = [];
+    for (let k = 0; k + 1 < lines.length; k++) {
+      const a = lines[k];
+      const b = lines[k + 1];
+      if (a.page !== b.page || a.band.figure || b.band.figure || b.band.top - a.band.bottom > textHeight * 1.2) continue;
+      const shift = b.band.left - a.band.left;
+      if (shift >= textHeight * 0.8 && shift <= textHeight * 2 && a.band.left > L0 + textHeight) hangLefts.push(a.band.left);
+    }
+    const hanging = (left: number) => hangLefts.filter((x) => Math.abs(x - left) <= textHeight * 0.3).length >= 2;
+    // 1行だけの項目の次の行が、同じ書き出しの位置から始まるなら新しい項目(続きの行なら字下げされるはず)。
+    const newItem = (item: Item | undefined, band: Band) => {
+      if (item?.kind !== 'text' || !hanging(band.left)) return false;
+      const first = item.fragments[0];
+      if (Math.abs(first.x0 - band.left) > textHeight * 0.3) return false;
+      return item.fragments.every((fragment) => fragment.page === first.page && fragment.top < first.bottom);
+    };
     let lastPage = -1;
     for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
       const { page, band } = lines[lineIndex];
       // 次の行が図や表の横の段の行なら、その段の右端まで届く行は、段落の途中(右端まで届いた行)とみなす。
-      const nextBand = lines[lineIndex + 1]?.band;
+      // (間にある横に並ぶ図は飛ばす。)
+      let nextIndex = lineIndex + 1;
+      while (nextIndex < lines.length && lines[nextIndex].band.figure && lines[nextIndex].page === page) nextIndex += 1;
+      const nextBand = lines[nextIndex]?.band;
       const nextColumnRight =
-        nextBand && nextBand.limit !== undefined && band.limit === undefined && lines[lineIndex + 1].page === page
+        nextBand && nextBand.limit !== undefined && band.limit === undefined && lines[nextIndex].page === page
           ? (columnRights.get(nextBand.limit) ?? nextBand.limit)
           : undefined;
       // 前の行との間が行間より大きく空いていれば(段落や「(1)」などの項目の区切り)、段落としてつなげない。
@@ -2713,7 +2816,8 @@ export function analyzeDocument(pages: PageBands[], expected: number, forced?: L
           previousFull !== null &&
           current?.kind === 'text' &&
           band.left <= previousFull.left + W * 0.06 &&
-          band.left >= previousFull.left - W * 0.03;
+          band.left >= previousFull.left - W * 0.03 &&
+          !newItem(current, band);
         if (continues && current?.kind === 'text') current.fragments.push(...toFragments(page, band));
         else items.push({ kind: 'text', fragments: toFragments(page, band) });
         // 短い行(選択肢の式など)は、段の右端がその行自身で決まるので「右端まで届いた」とみなさない。
@@ -2784,7 +2888,7 @@ export function analyzeDocument(pages: PageBands[], expected: number, forced?: L
       }
 
       if (full || tail) {
-        if (current?.kind === 'text' && (previousFull !== null || tail)) current.fragments.push(...toFragments(page, band));
+        if (current?.kind === 'text' && (previousFull !== null || tail) && !newItem(current, band)) current.fragments.push(...toFragments(page, band));
         else items.push({ kind: 'text', fragments: toFragments(page, band) });
         // 句読点などで右端がわずかに短い行は、段落の途中とみなして次の行へつなげる。
         previousFull = full || band.right >= rightEdge - W * 0.025 ? band : null;
@@ -2902,6 +3006,14 @@ export function analyzeDocument(pages: PageBands[], expected: number, forced?: L
           next.top - aside.bottom <= textHeight * 2 &&
           next.top >= aside.top;
         if (!continues) continue;
+        // 間の文章が、まとめた範囲の中に入るなら(上の図と、文章の横の表など)まとめない(文章が白く抜けた大きな図になる)。
+        const union = { left: Math.min(aside.left, next.left), right: Math.max(aside.right, next.right), top: aside.top, bottom: next.bottom };
+        const covers = items.slice(i + 1, k).some(
+          (item) =>
+            item.kind === 'text' &&
+            item.fragments.some((fragment) => fragment.page === aside.page && fragment.x0 >= union.left && fragment.x1 <= union.right && fragment.top >= union.top && fragment.bottom <= union.bottom),
+        );
+        if (covers) continue;
       }
       items.splice(i, 1);
       let j = i;
@@ -3056,7 +3168,10 @@ export function analyzeDocument(pages: PageBands[], expected: number, forced?: L
         if (j === i || inner.kind !== 'block' || inner.page !== outer.page) continue;
         const overlap = Math.max(0, Math.min(outer.right, inner.right) - Math.max(outer.left, inner.left)) * Math.max(0, Math.min(outer.bottom, inner.bottom) - Math.max(outer.top, inner.top));
         const innerArea = (inner.right - inner.left) * (inner.bottom - inner.top);
-        if (innerArea <= 0 || overlap < innerArea * 0.8) continue;
+        const outerArea = (outer.right - outer.left) * (outer.bottom - outer.top);
+        // 図どうしは少しでも重なれば(小さい方の1割以上)まとめる。図と表は、表がほぼ図の中にあるときだけ。
+        const enough = inner.figure ? overlap >= Math.min(innerArea, outerArea) * 0.1 : overlap >= innerArea * 0.8;
+        if (innerArea <= 0 || !enough) continue;
         outer.left = Math.min(outer.left, inner.left);
         outer.right = Math.max(outer.right, inner.right);
         outer.top = Math.min(outer.top, inner.top);
@@ -3066,6 +3181,17 @@ export function analyzeDocument(pages: PageBands[], expected: number, forced?: L
         if (j < i) i -= 1;
         j -= 1;
       }
+    }
+    // 図の範囲の中にすっぽり入る小さな文章(図の中の番号やラベル)は、文章から外して図の一部として見せる。
+    for (let i = items.length - 1; i >= 0; i--) {
+      const item = items[i];
+      if (item.kind !== 'text' || item.fragments.length > 3) continue;
+      const width = Math.max(...item.fragments.map((fragment) => fragment.x1)) - Math.min(...item.fragments.map((fragment) => fragment.x0));
+      if (width > textHeight * 3) continue;
+      const inside = item.fragments.every((fragment) =>
+        items.some((block) => block.kind === 'block' && block.figure && block.page === fragment.page && fragment.x0 >= block.left && fragment.x1 <= block.right && fragment.top >= block.top && fragment.bottom <= block.bottom),
+      );
+      if (inside) items.splice(i, 1);
     }
     // どの経路で作ったブロックでも、文章として別に表示する字が範囲に入っていれば白く塗る(二重に写さない)。
     for (const block of items) {
@@ -3083,6 +3209,32 @@ export function analyzeDocument(pages: PageBands[], expected: number, forced?: L
     return items;
   });
 
+  // ほかの問題の文章が図・表のブロックに重なっていれば、その字も白く塗る(次の問題の図が前の問題の行の横に置かれている場合など)。
+  questions.forEach((items) => {
+    for (const block of items) {
+      if (block.kind !== 'block') continue;
+      for (const other of questions) {
+        if (other === items) continue;
+        for (const item of other) {
+          if (item.kind !== 'text') continue;
+          for (const fragment of item.fragments) {
+            if (fragment.page !== block.page || fragment.x1 <= block.left || fragment.x0 >= block.right || fragment.bottom <= block.top || fragment.top >= block.bottom) continue;
+            block.masks = [...(block.masks ?? []), { top: fragment.top, bottom: fragment.bottom, left: fragment.x0, right: fragment.x1 }];
+          }
+        }
+      }
+    }
+  });
+  // 図のブロックは、同じページの次の問題の書き出しより下へは伸ばさない(次の問題の文章を図に写し込まない)。
+  questions.forEach((items, index) => {
+    const next = questions[index + 1]?.[0];
+    if (!next) return;
+    const nextPage = next.kind === 'text' ? next.fragments[0].page : next.page;
+    const nextTop = next.kind === 'text' ? Math.min(...next.fragments.filter((fragment) => fragment.page === nextPage).map((fragment) => fragment.top)) : next.top;
+    for (const item of items) {
+      if (item.kind === 'block' && item.page === nextPage && item.top < nextTop && item.bottom > nextTop) item.bottom = nextTop - 2;
+    }
+  });
   return { ok: true, found: collected.length, expected, textHeight, pageWidth: W, questions };
 }
 

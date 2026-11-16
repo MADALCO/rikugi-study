@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { readZipEntry, readZipIndex } from '../lib/zipReader';
+import { getGradeMode, setGradeMode, type GradeMode } from '../lib/gradeMode';
 import { cleanupStorage, exportBackup, getCatalog, libraryInfo, recordImport, type LibraryInfo, getLastBackupAt, getPdf, importBackup, LAYOUT_VERSION, pdfNames, saveCatalog, saveLayouts, savePdf, type Catalog } from '../lib/db';
 import type { DocLayout } from '../lib/reflow';
 
@@ -19,6 +20,7 @@ export function Settings() {
   const [usage, setUsage] = useState<string | null>(null);
   const [lastBackup, setLastBackup] = useState<number | null>(null);
   const [info, setInfo] = useState<LibraryInfo | null>(null);
+  const [gradeMode, setMode] = useState<GradeMode>(() => getGradeMode());
   const zipInput = useRef<HTMLInputElement>(null);
   const backupInput = useRef<HTMLInputElement>(null);
 
@@ -161,6 +163,37 @@ export function Settings() {
             event.target.value = '';
           }}
         />
+      </section>
+
+      <section className="setting">
+        <h2>採点のしかた</h2>
+        <div className="actions" role="radiogroup" aria-label="採点のしかた">
+          {(
+            [
+              ['each', '1問ごとに採点'],
+              ['all', '最後にまとめて採点'],
+            ] as const
+          ).map(([mode, label]) => (
+            <button
+              key={mode}
+              type="button"
+              role="radio"
+              aria-checked={gradeMode === mode}
+              className={gradeMode === mode ? 'btn btn-primary' : 'btn'}
+              onClick={() => {
+                setGradeMode(mode);
+                setMode(mode);
+              }}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+        <p className="muted">
+          {gradeMode === 'each'
+            ? '答えを選んでから「採点する」を押すと、その問題の正誤が分かります。正答が未登録の回は、解答PDFの表を自動で読み取って使います。'
+            : '本番と同じく、すべて解いて提出したときにまとめて採点します。'}
+        </p>
       </section>
 
       <section className="setting">

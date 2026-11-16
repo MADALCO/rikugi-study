@@ -12,7 +12,10 @@ import {
   type Attempt,
 } from '../lib/db';
 import { allSlots, formatDuration, getSubject, questionsFor, type Question, type Slot, type SubjectId } from '../lib/exam';
-import { isKeyComplete, scoreAnswers } from '../lib/scoring';
+import { isKeyComplete, scoreAnswers, type Answers } from '../lib/scoring';
+import { getGradeMode } from '../lib/gradeMode';
+import { readAnswerKey } from '../lib/answerReaderPdf';
+import { openPdf } from '../lib/reflowPdf';
 
 const SAVE_EVERY_SEC = 15;
 
@@ -53,6 +56,10 @@ export function Practice({ examId, subjectId }: { examId: string; subjectId: Sub
   const [currentIndex, setCurrentIndex] = useState(0);
   const [showGrid, setShowGrid] = useState(false);
   const pageRef = useRef(1);
+  const gradeMode = useMemo(() => getGradeMode(), []);
+  // 1問ごとの答え合わせに使う正答。登録済みの正答がなければ、解答PDFの表を自動で読み取ったものを使う。
+  const [key, setKey] = useState<{ answers: Answers; auto: boolean; uncertain: Set<string> } | null>(null);
+  const [keyState, setKeyState] = useState<'loading' | 'ready' | 'none'>('loading');
 
   useEffect(() => {
     void (async () => {
@@ -76,6 +83,44 @@ export function Practice({ examId, subjectId }: { examId: string; subjectId: Sub
       setPdf(bytes);
     })();
   }, [examId, subjectId]);
+
+  useEffect(() => {
+    if (gradeMode !== 'each') return;
+    let cancelled = false;
+    void (async () => {
+      const saved = await getKey(examId, subjectId);
+      if (saved && Object.keys(saved).length > 0) {
+        if (!cancelled) {
+          setKey({ answers: saved, auto: false, uncertain: new Set() });
+          setKeyState('ready');
+        }
+        return;
+      }
+      const catalog = await getCatalog();
+      const file = catalog?.exams.find((candidate) => candidate.id === examId)?.subjects[subjectId]?.answer;
+      const bytes = file ? await getPdf(file) : null;
+      if (!bytes) {
+        if (!cancelled) setKeyState('none');
+        return;
+      }
+      const handle = openPdf(bytes);
+      try {
+        const result = await readAnswerKey(await handle.promise, subject);
+        if (cancelled) return;
+        if (result.ok) {
+          setKey({ answers: result.autoKey.key, auto: true, uncertain: new Set(result.autoKey.uncertain) });
+          setKeyState('ready');
+        } else setKeyState('none');
+      } catch {
+        if (!cancelled) setKeyState('none');
+      } finally {
+        handle.destroy();
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [examId, subjectId, subject, gradeMode]);
 
   const persist = useCallback(() => {
     if (attemptRef.current) void saveAttempt(attemptRef.current);
@@ -113,10 +158,62 @@ export function Practice({ examId, subjectId }: { examId: string; subjectId: Sub
       else draft.answers[slot.key] = value;
       draft.pageOf[question.id] = pageRef.current;
     });
-    // スマホは1問ずつ表示するので、A問題は選んだら次へ進む。
-    if (compact && question.type === 'A' && value !== undefined) {
-      setCurrentIndex((index) => Math.min(index + 1, questions.length - 1));
+    // 選んでも次の問題へは進まない(迷いながら仮に選ぶことがあるため)。
+  };
+
+  const isChecked = (question: Question) => Boolean(attempt?.checked?.[question.id]);
+  const canGrade = (question: Question) => Boolean(key && question.slots.every((slot) => key.answers[slot.key] !== undefined));
+  const resultOf = (question: Question) => {
+    if (!key || !attempt) return null;
+    const ok = question.slots.filter((slot) => attempt.answers[slot.key] === key.answers[slot.key]).length;
+    return { ok, total: question.slots.length };
+  };
+  const check = (question: Question) =>
+    update((draft) => {
+      draft.checked = { ...(draft.checked ?? {}), [question.id]: true };
+      draft.pageOf[question.id] = pageRef.current;
+    });
+
+  /** 1問ごとの答え合わせの欄(「採点する」ボタンと結果)。 */
+  const judgeRow = (question: Question) => {
+    if (gradeMode !== 'each') return null;
+    if (isChecked(question)) {
+      const result = resultOf(question);
+      if (!result) return null;
+      const all = result.ok === result.total;
+      const correctText = question.type === 'A' ? `正解は ${key!.answers[question.slots[0].key]}` : `${result.ok}/${result.total}欄正解`;
+      const unsure = key!.auto && question.slots.some((slot) => key!.uncertain.has(slot.key));
+      return (
+        <div className="judge" role="status">
+          <span className={all ? 'judge-ok' : 'judge-ng'}>{all ? '○ 正解' : '× 不正解'}</span>
+          <span className="muted">{correctText}{unsure ? '(正答は自動読み取りのため要確認)' : ''}</span>
+        </div>
+      );
     }
+    if (keyState === 'loading') return <div className="judge muted">正答を準備しています…</div>;
+    if (!canGrade(question)) return <div className="judge muted">この回は正答を読み取れないため、提出後にまとめて採点します。</div>;
+    const answered = question.slots.every((slot) => attempt?.answers[slot.key] !== undefined);
+    return (
+      <div className="judge">
+        <button type="button" className="btn" disabled={!answered} onClick={() => check(question)}>
+          採点する
+        </button>
+      </div>
+    );
+  };
+
+  /** 答え合わせを済ませた問題は、正答を示して解答を変えられないようにする。 */
+  const marks = (question: Question) => {
+    const done = gradeMode === 'each' && isChecked(question) && key;
+    return (
+      <QuestionMarks
+        question={question}
+        answers={attempt!.answers}
+        corrects={done ? key!.answers : undefined}
+        judge={Boolean(done)}
+        onMark={done ? undefined : (slot, value) => mark(question, slot, value)}
+      />
+    );
   };
 
   const onPageChange = useCallback((page: number) => {
@@ -181,6 +278,10 @@ export function Practice({ examId, subjectId }: { examId: string; subjectId: Sub
       {questions.map((question, index) => {
         const classes = ['qchip'];
         if (isAnswered(question, attempt)) classes.push('qchip-done');
+        if (gradeMode === 'each' && isChecked(question)) {
+          const result = resultOf(question);
+          if (result) classes.push(result.ok === result.total ? 'qchip-ok' : 'qchip-ng');
+        }
         if (index === currentIndex) classes.push('qchip-now');
         return (
           <button
@@ -254,7 +355,10 @@ export function Practice({ examId, subjectId }: { examId: string; subjectId: Sub
               {submitButton}
             </div>
           ) : (
-            <QuestionMarks question={current} answers={attempt.answers} onMark={(slot, value) => mark(current, slot, value)} />
+            <>
+              {marks(current)}
+              {judgeRow(current)}
+            </>
           )}
         </section>
       </div>
@@ -278,7 +382,8 @@ export function Practice({ examId, subjectId }: { examId: string; subjectId: Sub
                   <span className="q-id">{question.id}</span>
                   {flagButton(question)}
                 </div>
-                <QuestionMarks question={question} answers={attempt.answers} onMark={(slot, value) => mark(question, slot, value)} />
+                {marks(question)}
+                {judgeRow(question)}
               </div>
             ))}
           </div>

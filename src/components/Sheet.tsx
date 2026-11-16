@@ -19,10 +19,12 @@ interface BubblesProps {
   value: number | undefined;
   onChange?: (value: number | undefined) => void;
   correct?: number | null;
+  /** 答え合わせの結果として、選んだ答えが正答と違えば赤く示す。 */
+  judge?: boolean;
 }
 
 /** マークシートの楕円。もう一度押すと消せる。 */
-export function Bubbles({ slot, value, onChange, correct }: BubblesProps) {
+export function Bubbles({ slot, value, onChange, correct, judge }: BubblesProps) {
   const numbers = Array.from({ length: slot.choices }, (_, index) => index + 1);
   return (
     <div className="bubbles" role="group" aria-label={`${slot.label}の解答`}>
@@ -30,6 +32,7 @@ export function Bubbles({ slot, value, onChange, correct }: BubblesProps) {
         const classes = ['bubble'];
         if (value === number) classes.push('bubble-on');
         if (correct === number) classes.push('bubble-correct');
+        if (judge && value === number && correct != null && correct !== number) classes.push('bubble-wrong');
         return (
           <button
             key={number}
@@ -54,9 +57,10 @@ interface QuestionMarksProps {
   corrects?: Answers;
   edited?: (slot: Slot) => boolean;
   unsure?: (slot: Slot) => boolean;
+  judge?: boolean;
 }
 
-export function QuestionMarks({ question, answers, onMark, corrects, edited, unsure }: QuestionMarksProps) {
+export function QuestionMarks({ question, answers, onMark, corrects, edited, unsure, judge }: QuestionMarksProps) {
   if (question.type === 'A') {
     const slot = question.slots[0];
     return (
@@ -64,6 +68,7 @@ export function QuestionMarks({ question, answers, onMark, corrects, edited, uns
         slot={slot}
         value={answers[slot.key]}
         correct={corrects?.[slot.key]}
+        judge={judge}
         onChange={onMark ? (value) => onMark(slot, value) : undefined}
       />
     );
@@ -77,6 +82,7 @@ export function QuestionMarks({ question, answers, onMark, corrects, edited, uns
             slot={slot}
             value={answers[slot.key]}
             correct={corrects?.[slot.key]}
+            judge={judge}
             onChange={onMark ? (value) => onMark(slot, value) : undefined}
           />
         </div>

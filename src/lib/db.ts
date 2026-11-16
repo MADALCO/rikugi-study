@@ -26,6 +26,8 @@ export interface Attempt {
   flags: Record<string, boolean>;
   pageOf: Record<string, number>;
   points: number | null;
+  /** 1問ごとの答え合わせを済ませた問題(済ませた問題は解答を変えられない)。 */
+  checked?: Record<string, boolean>;
 }
 
 export interface KeyRecord {

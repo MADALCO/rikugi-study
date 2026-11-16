@@ -707,8 +707,44 @@ a.cell:hover {
   font-weight: 700;
 }
 
+.bubble-wrong {
+  background: var(--ng);
+  border-color: var(--ng);
+  color: #fff;
+}
+
 .bubble:disabled {
   cursor: default;
+}
+
+/* 1問ごとの答え合わせ */
+.judge {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  min-height: 40px;
+  font-size: 0.9rem;
+}
+
+.judge-ok {
+  color: var(--ok);
+  font-weight: 700;
+}
+
+.judge-ng {
+  color: var(--ng);
+  font-weight: 700;
+}
+
+.qchip-ok {
+  border-color: var(--ok) !important;
+  color: var(--ok) !important;
+}
+
+.qchip-ng {
+  border-color: var(--ng) !important;
+  color: var(--ng) !important;
 }
 
 .blanks {

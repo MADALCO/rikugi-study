@@ -97,7 +97,7 @@ export async function getPdf(name: string): Promise<ArrayBuffer | null> {
 // ---- 表示用レイアウト(切り出し座標のみ。解析方法を変えたら版を上げる) ----
 
 /** 解析方法の版。Macで作った切り分けデータ(layouts.json)も、この版が一致するときだけ使う。 */
-export const LAYOUT_VERSION = 'v166';
+export const LAYOUT_VERSION = 'v167';
 const layoutKey = (file: string) => `layout-${LAYOUT_VERSION}:${file}`;
 
 export async function getLayout(file: string): Promise<DocLayout | null> {
@@ -119,6 +119,69 @@ export async function saveLayouts(layouts: Record<string, DocLayout>): Promise<n
   }
   await tx.done;
   return count;
+}
+
+/** 読み込んだZIPの記録(設定画面に、何を読み込んだかを表示するため)。 */
+export interface ImportRecord {
+  file: string;
+  at: number;
+  /** ライブラリ: 回の数。切り分けデータ: 科目の数。 */
+  count: number;
+  /** 切り分けデータの版。 */
+  version?: string;
+}
+
+export async function recordImport(kind: 'library' | 'layouts', record: ImportRecord): Promise<void> {
+  await (await db()).put('meta', record, `import-${kind}`);
+}
+
+export interface LibraryInfo {
+  exams: number;
+  pdfs: number;
+  /** いまの版の切り分けデータがある科目の数。 */
+  layouts: number;
+  library: ImportRecord | null;
+  layoutsImport: ImportRecord | null;
+}
+
+export async function libraryInfo(): Promise<LibraryInfo> {
+  const database = await db();
+  const metaKeys = await database.getAllKeys('meta');
+  return {
+    exams: (await getCatalog())?.exams.length ?? 0,
+    pdfs: await database.count('pdfs'),
+    layouts: metaKeys.filter((key) => key.startsWith(`layout-${LAYOUT_VERSION}:`)).length,
+    library: ((await database.get('meta', 'import-library')) as ImportRecord | undefined) ?? null,
+    layoutsImport: ((await database.get('meta', 'import-layouts')) as ImportRecord | undefined) ?? null,
+  };
+}
+
+/**
+ * 使わなくなったデータを消す: 古い版の切り分けデータ(アプリを更新するたびに残っていた)と、
+ * 回の一覧にないPDF。消した件数を返す。
+ */
+export async function cleanupStorage(): Promise<number> {
+  const database = await db();
+  let removed = 0;
+  const current = `layout-${LAYOUT_VERSION}:`;
+  for (const key of await database.getAllKeys('meta')) {
+    if (key.startsWith('layout-') && !key.startsWith(current)) {
+      await database.delete('meta', key);
+      removed += 1;
+    }
+  }
+  const catalog = await getCatalog();
+  if (catalog) {
+    const used = new Set<string>();
+    for (const exam of catalog.exams) for (const files of Object.values(exam.subjects)) for (const name of [files?.question, files?.answer]) if (name) used.add(name);
+    for (const key of await database.getAllKeys('pdfs')) {
+      if (!used.has(key)) {
+        await database.delete('pdfs', key);
+        removed += 1;
+      }
+    }
+  }
+  return removed;
 }
 
 // ---- 正答 ----

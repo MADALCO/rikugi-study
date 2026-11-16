@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { readZipEntry, readZipIndex } from '../lib/zipReader';
-import { exportBackup, getCatalog, getLastBackupAt, getPdf, importBackup, LAYOUT_VERSION, pdfNames, saveCatalog, saveLayouts, savePdf, type Catalog } from '../lib/db';
+import { cleanupStorage, exportBackup, getCatalog, libraryInfo, recordImport, type LibraryInfo, getLastBackupAt, getPdf, importBackup, LAYOUT_VERSION, pdfNames, saveCatalog, saveLayouts, savePdf, type Catalog } from '../lib/db';
 import type { DocLayout } from '../lib/reflow';
 
 const isStandalone = () =>
@@ -18,13 +18,14 @@ export function Settings() {
   const [persisted, setPersisted] = useState<boolean | null>(null);
   const [usage, setUsage] = useState<string | null>(null);
   const [lastBackup, setLastBackup] = useState<number | null>(null);
-  const [examCount, setExamCount] = useState(0);
+  const [info, setInfo] = useState<LibraryInfo | null>(null);
   const zipInput = useRef<HTMLInputElement>(null);
   const backupInput = useRef<HTMLInputElement>(null);
 
   const refresh = async () => {
     setLastBackup(await getLastBackupAt());
-    setExamCount((await getCatalog())?.exams.length ?? 0);
+    await cleanupStorage();
+    setInfo(await libraryInfo());
     if (navigator.storage?.persist) {
       setPersisted((await navigator.storage.persisted()) || (await navigator.storage.persist()));
     }
@@ -61,6 +62,7 @@ export function Settings() {
           done += 1;
         }
         await saveCatalog(catalog);
+        await recordImport('library', { file: file.name, at: Date.now(), count: catalog.exams.length });
         notes.push(`${catalog.exams.length}回分を読み込みました。`);
       }
       // Macで作った切り分けデータ。アプリの解析方法の版と同じときだけ使う(違えば問題を開くときに端末で解析する)。
@@ -74,6 +76,7 @@ export function Settings() {
             const layout = (await decode(entry.name)) as DocLayout;
             saved += await saveLayouts({ [entry.name.slice('layouts/'.length, -'.json'.length)]: layout });
           }
+          await recordImport('layouts', { file: file.name, at: Date.now(), count: saved, version });
           notes.push(`切り分けデータ(${saved}科目分)を読み込みました。`);
         } else {
           notes.push('切り分けデータはアプリの版と合わないため使いませんでした(問題を開くときに端末で解析します)。');
@@ -130,7 +133,19 @@ export function Settings() {
 
       <section className="setting">
         <h2>過去問ライブラリ</h2>
-        <p className="muted">読み込み済み: {examCount}回分{usage ? ` ・ 使用容量 ${usage}` : ''}</p>
+        <p className="muted">
+          読み込み済み: {info?.exams ?? 0}回分(PDF {info?.pdfs ?? 0}件){usage ? ` ・ 使用容量 ${usage}` : ''}
+          <br />
+          {info?.library
+            ? `過去問: ${info.library.file}(${formatDate(info.library.at)}に読み込み)`
+            : info?.exams
+              ? '過去問: 読み込み済み(読み込んだ日の記録はありません)'
+              : '過去問: まだ読み込んでいません(rikugi-library.zip)'}
+          <br />
+          {info?.layouts
+            ? `切り分けデータ: ${LAYOUT_VERSION}・${info.layouts}科目分${info.layoutsImport ? `(${info.layoutsImport.file}、${formatDate(info.layoutsImport.at)}に読み込み)` : '(この端末で解析)'}`
+            : `切り分けデータ: ${LAYOUT_VERSION}はまだありません(rikugi-layouts.zip を読み込むと表示が速くなります)`}
+        </p>
         <button type="button" className="btn" disabled={busy} onClick={() => zipInput.current?.click()}>
           ZIPを読み込む
         </button>

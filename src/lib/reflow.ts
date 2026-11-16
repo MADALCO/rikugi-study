@@ -564,11 +564,14 @@ export function rowPieces(ink: Ink, top: number, bottom: number, x0: number, x1:
  */
 export function isDenseLine(band: Band, textHeight: number, strict = false): boolean {
   const start = band.atoms[0]?.x0 ?? 0;
+  let wide = 0;
   for (let i = 1; i < band.atoms.length; i++) {
     const gap = band.atoms[i].x0 - band.atoms[i - 1].x1;
     if (gap > textHeight * 2.2 && (strict || band.atoms[i - 1].x1 - start > textHeight * 5)) return false;
+    // 大きな空白が2か所以上ある短い行(表の見出し「A　B　C」など)も文章ではない。
+    if (gap > textHeight * 2.2) wide += 1;
   }
-  return true;
+  return wide < 2;
 }
 
 /** 指定の列の範囲に、指定の行の範囲で墨があるか。 */
@@ -1798,6 +1801,14 @@ export function regionFigureSplit(ink: Ink, top: number, bottom: number, textHei
     });
     if (!changed) break;
   }
+  // 図に含めた字の一部で、上下に離れた小さなかけら(「点」の下の点など)も図に含める。
+  page.forEach((box, id) => {
+    if (owner[id] >= 0 || box.y1 - box.y0 > textHeight * 0.6 || box.x1 - box.x0 > textHeight) return;
+    const parent = page.findIndex(
+      (other, j) => owner[j] >= 0 && j !== id && other.x0 < box.x1 && box.x0 < other.x1 && other.y0 <= box.y1 + 3 && box.y0 <= other.y1 + 3 && other.y1 - other.y0 <= textHeight * 1.5,
+    );
+    if (parent >= 0) owner[id] = owner[parent];
+  });
   // 本文の墨。
   const text: Ink = { width: W, height: ink.height, data: new Uint8Array(ink.data.length) };
   for (let y = 0; y < height; y++) {
@@ -2749,8 +2760,16 @@ export function analyzeDocument(pages: PageBands[], expected: number, forced?: L
       if (shift >= textHeight * 0.8 && shift <= textHeight * 2 && a.band.left > L0 + textHeight) hangLefts.push(a.band.left);
     }
     const hanging = (left: number) => hangLefts.filter((x) => Math.abs(x - left) <= textHeight * 0.3).length >= 2;
+    // 行の頭が項目の番号「(1)」の形(細い括弧・数字・括弧の3つの小さな字のあとに空き)なら、新しい項目の書き出し。
+    const itemLabel = (band: Band) => {
+      const [a, b, c, d] = band.atoms;
+      if (!a || !b || !c || !d) return false;
+      const narrow = (atom: Atom, limit: number) => atom.x1 - atom.x0 <= textHeight * limit;
+      return narrow(a, 0.4) && narrow(b, 0.6) && narrow(c, 0.4) && c.x1 - a.x0 <= textHeight * 1.3 && b.x0 - a.x1 <= textHeight * 0.3 && c.x0 - b.x1 <= textHeight * 0.3 && d.x0 - c.x1 >= textHeight * 0.6;
+    };
     // 1行だけの項目の次の行が、同じ書き出しの位置から始まるなら新しい項目(続きの行なら字下げされるはず)。
     const newItem = (item: Item | undefined, band: Band) => {
+      if (itemLabel(band)) return true;
       if (item?.kind !== 'text' || !hanging(band.left)) return false;
       const first = item.fragments[0];
       if (Math.abs(first.x0 - band.left) > textHeight * 0.3) return false;
@@ -2969,7 +2988,14 @@ export function analyzeDocument(pages: PageBands[], expected: number, forced?: L
         }
       }
       // 縦に続くブロックだけをまとめる。横に並ぶ図と選択肢などは別々に表示する。
-      if (current?.kind === 'block' && current.page === page && !current.figure && !band.figure && band.top >= current.bottom - 2) {
+      // 上下に重なるブロック(分数の式の行が上下の行にかかる表など)も、横に重なっていればまとめる(重なった部分が二重に写らないように)。
+      if (
+        current?.kind === 'block' &&
+        current.page === page &&
+        !current.figure &&
+        !band.figure &&
+        (band.top >= current.bottom - 2 || (band.top >= current.top && band.left < current.right && current.left < band.right))
+      ) {
         current.bottom = band.bottom;
         current.left = Math.min(current.left, band.left);
         current.right = Math.max(current.right, band.right);
@@ -3182,6 +3208,92 @@ export function analyzeDocument(pages: PageBands[], expected: number, forced?: L
         j -= 1;
       }
     }
+    type BlockItem = Extract<Item, { kind: 'block' }>;
+    const area = (b: { left: number; right: number; top: number; bottom: number }) => Math.max(0, b.right - b.left) * Math.max(0, b.bottom - b.top);
+    const overlapArea = (a: BlockItem, b: BlockItem) =>
+      Math.max(0, Math.min(a.right, b.right) - Math.max(a.left, b.left)) * Math.max(0, Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top));
+    // 表のブロックの中にほぼ入っている図は、表と一緒に見えているので別に表示しない(同じ図が二度出ないように)。
+    for (let j = items.length - 1; j >= 0; j--) {
+      const figure = items[j];
+      if (figure.kind !== 'block' || !figure.figure) continue;
+      const holder = items.find((item): item is BlockItem => item.kind === 'block' && !item.figure && item.page === figure.page && overlapArea(item, figure) >= area(figure) * 0.9);
+      if (!holder) continue;
+      // 表からはみ出していた図の端も、表の範囲に含める。
+      holder.left = Math.min(holder.left, figure.left);
+      holder.right = Math.max(holder.right, figure.right);
+      holder.top = Math.min(holder.top, figure.top);
+      holder.bottom = Math.max(holder.bottom, figure.bottom);
+      items.splice(j, 1);
+    }
+    // 上下に接して(または重なって)並ぶ表のブロックは1つにまとめる(表が行の途中で分かれて、重なった部分が二度写らないように)。
+    for (let changed = true; changed; ) {
+      changed = false;
+      for (let i = 0; i < items.length && !changed; i++) {
+        const a = items[i];
+        if (a.kind !== 'block' || a.figure) continue;
+        for (let j = i + 1; j < items.length && !changed; j++) {
+          const b = items[j];
+          if (b.kind !== 'block' || b.figure || b.page !== a.page) continue;
+          const horizontal = Math.min(a.right, b.right) - Math.max(a.left, b.left);
+          const gap = Math.max(a.top, b.top) - Math.min(a.bottom, b.bottom);
+          // 間が空いていても、表の欄の折り返しの1行だけをはさむなら(下で確かめる)まとめる。
+          if (horizontal < Math.min(a.right - a.left, b.right - b.left) * 0.5 || gap > textHeight * 3.5) continue;
+          const union = { page: a.page, left: Math.min(a.left, b.left), right: Math.max(a.right, b.right), top: Math.min(a.top, b.top), bottom: Math.max(a.bottom, b.bottom) };
+          // 間にある文章を表の中に取り込んでしまうならまとめない。ただし表の行の途中に挟まった1行だけの文章(分数の分子など)は表に戻す。
+          const inner = items.filter(
+            (item): item is Extract<Item, { kind: 'text' }> =>
+              item.kind === 'text' && item.fragments.some((f) => f.page === union.page && f.x0 >= union.left && f.x1 <= union.right && f.top >= union.top && f.bottom <= union.bottom),
+          );
+          const oneLine = (item: Extract<Item, { kind: 'text' }>) =>
+            item.fragments.every((f) => f.page === union.page && f.baseline === item.fragments[0].baseline && f.x0 >= union.left && f.x1 <= union.right && f.top >= union.top - 2 && f.bottom <= union.bottom + 2);
+          const short = (item: Extract<Item, { kind: 'text' }>) =>
+            Math.max(...item.fragments.map((f) => f.x1)) - Math.min(...item.fragments.map((f) => f.x0)) <= (union.right - union.left) * 0.6;
+          if (inner.length > 1 || (inner.length === 1 && (!oneLine(inner[0]) || !short(inner[0])))) continue;
+          // 離れた表の部品をつなぐのは、はさまる1行が表の左端より字下げされている(欄の折り返し)ときだけ。
+          if (gap > textHeight * 0.6 && (inner.length === 0 || Math.min(...inner[0].fragments.map((f) => f.x0)) < union.left + textHeight * 1.5)) continue;
+          for (const item of inner) {
+            const fragments = item.fragments;
+            const covers = (mask: Mask) => fragments.some((f) => mask.left <= f.x0 && mask.right >= f.x1 && mask.top <= f.top && mask.bottom >= f.bottom);
+            a.masks = a.masks?.filter((mask) => !covers(mask));
+            b.masks = b.masks?.filter((mask) => !covers(mask));
+            items.splice(items.indexOf(item), 1);
+          }
+          if (inner.length > 0) {
+            // 取り除いた分だけ、b の位置がずれる。
+            j = items.indexOf(b);
+            i = items.indexOf(a);
+          }
+          a.left = union.left;
+          a.right = union.right;
+          a.top = union.top;
+          a.bottom = union.bottom;
+          if (b.masks) a.masks = [...(a.masks ?? []), ...b.masks];
+          if (b.aside) a.aside = b.aside;
+          items.splice(j, 1);
+          changed = true;
+        }
+      }
+    }
+    // 表のブロックが図に大きくかかっている場合(表の行に図の一部やラベル・説明が入った)は、図を表に含めて1つにする
+    // (図が表の中と外で二度写らないように。図の左端で表を切ると、図の説明の行などが途中で割れるため)。
+    for (let i = 0; i < items.length; i++) {
+      const block = items[i];
+      if (block.kind !== 'block' || block.figure) continue;
+      for (let j = 0; j < items.length; j++) {
+        const figure = items[j];
+        if (figure.kind !== 'block' || !figure.figure || figure.page !== block.page) continue;
+        // 図の大部分(3割以上)が表のブロックに入っているときだけ(端が触れているだけなら何もしない)。
+        if (overlapArea(block, figure) < area(figure) * 0.3) continue;
+        block.left = Math.min(block.left, figure.left);
+        block.right = Math.max(block.right, figure.right);
+        block.top = Math.min(block.top, figure.top);
+        block.bottom = Math.max(block.bottom, figure.bottom);
+        if (figure.masks) block.masks = [...(block.masks ?? []), ...figure.masks];
+        items.splice(j, 1);
+        if (j < i) i -= 1;
+        j -= 1;
+      }
+    }
     // 図の範囲の中にすっぽり入る小さな文章(図の中の番号やラベル)は、文章から外して図の一部として見せる。
     for (let i = items.length - 1; i >= 0; i--) {
       const item = items[i];
@@ -3191,7 +3303,27 @@ export function analyzeDocument(pages: PageBands[], expected: number, forced?: L
       const inside = item.fragments.every((fragment) =>
         items.some((block) => block.kind === 'block' && block.figure && block.page === fragment.page && fragment.x0 >= block.left && fragment.x1 <= block.right && fragment.top >= block.top && fragment.bottom <= block.bottom),
       );
-      if (inside) items.splice(i, 1);
+      if (inside) {
+        items.splice(i, 1);
+        continue;
+      }
+      // 図の縁に接する、字にならない小さな墨のかけら(図の線の端など)は、図を広げて含める。
+      const height = Math.max(...item.fragments.map((fragment) => fragment.bottom)) - Math.min(...item.fragments.map((fragment) => fragment.top));
+      if (width > textHeight * 0.5 || height > textHeight * 0.5) continue;
+      const f = item.fragments[0];
+      const touching = items.find(
+        (block): block is Extract<Item, { kind: 'block' }> =>
+          block.kind === 'block' && !!block.figure && block.page === f.page && f.x0 <= block.right + 3 && f.x1 >= block.left - 3 && f.top <= block.bottom + 3 && f.bottom >= block.top - 3,
+      );
+      if (touching) {
+        for (const fragment of item.fragments) {
+          touching.left = Math.min(touching.left, fragment.x0);
+          touching.right = Math.max(touching.right, fragment.x1);
+          touching.top = Math.min(touching.top, fragment.top);
+          touching.bottom = Math.max(touching.bottom, fragment.bottom);
+        }
+        items.splice(i, 1);
+      }
     }
     // どの経路で作ったブロックでも、文章として別に表示する字が範囲に入っていれば白く塗る(二重に写さない)。
     for (const block of items) {

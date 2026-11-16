@@ -15,6 +15,9 @@ const MAX_SOURCE_PIXELS = 6_000_000;
 const MAX_OUTPUT_PIXELS = 8_000_000;
 const MAX_ZOOM_PIXELS = 6_000_000;
 const REGION_PAD = 3;
+/** 行の字を切り抜くときの余白(解析幅の px)。字の端が欠けないように。 */
+const FRAGMENT_PAD_X = 1;
+const FRAGMENT_PAD_Y = 1.5;
 
 /** ページから切り出して描いた部分。座標は解析幅基準。 */
 interface Source {
@@ -261,10 +264,23 @@ export const ReflowView = memo(function ReflowView({ data, file, subject, questi
           for (const fragment of row.fragments) {
             const source = cache.get(fragment.page)!;
             const { ratio } = source;
-            const w = fragment.x1 - fragment.x0;
-            const h = fragment.bottom - fragment.top;
-            const top = y + (row.ascent - (fragment.baseline - fragment.top)) * zoom;
-            context.drawImage(source.canvas, (fragment.x0 - source.left) * ratio, (fragment.top - source.top) * ratio, w * ratio, h * ratio, fragment.dx * zoom * out, top * out, w * zoom * out, h * zoom * out);
+            // 解析(1200px幅)で求めた字の範囲ぴったりに切ると、高い解像度で描いたときに字の端(細い横棒など)が欠けるので、少し広く切る。
+            const padX = FRAGMENT_PAD_X;
+            const padY = FRAGMENT_PAD_Y;
+            const w = fragment.x1 - fragment.x0 + padX * 2;
+            const h = fragment.bottom - fragment.top + padY * 2;
+            const top = y + (row.ascent - (fragment.baseline - fragment.top) - padY) * zoom;
+            context.drawImage(
+              source.canvas,
+              (fragment.x0 - padX - source.left) * ratio,
+              (fragment.top - padY - source.top) * ratio,
+              w * ratio,
+              h * ratio,
+              (fragment.dx - padX) * zoom * out,
+              top * out,
+              w * zoom * out,
+              h * zoom * out,
+            );
           }
         }
       }

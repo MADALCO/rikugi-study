@@ -57,6 +57,9 @@ export function Practice({ examId, subjectId }: { examId: string; subjectId: Sub
   const [showGrid, setShowGrid] = useState(false);
   const pageRef = useRef(1);
   const gradeMode = useMemo(() => getGradeMode(), []);
+  // 1問ごとに採点するモードで、前回の解答が残っている回を開いたときは、続きから解くか最初から解き直すかを選ぶ。
+  const [askResume, setAskResume] = useState(false);
+  const [timerKey, setTimerKey] = useState(0);
   // 1問ごとの答え合わせに使う正答。登録済みの正答がなければ、解答PDFの表を自動で読み取ったものを使う。
   const [key, setKey] = useState<{ answers: Answers; auto: boolean; uncertain: Set<string> } | null>(null);
   const [keyState, setKeyState] = useState<'loading' | 'ready' | 'none'>('loading');
@@ -81,6 +84,7 @@ export function Practice({ examId, subjectId }: { examId: string; subjectId: Sub
       attemptRef.current = active;
       setAttempt(active);
       setPdf(bytes);
+      if (getGradeMode() === 'each' && Object.keys(active.answers).length > 0) setAskResume(true);
     })();
   }, [examId, subjectId]);
 
@@ -161,6 +165,29 @@ export function Practice({ examId, subjectId }: { examId: string; subjectId: Sub
     // 選んでも次の問題へは進まない(迷いながら仮に選ぶことがあるため)。
   };
 
+  /** 解答と答え合わせの結果を消して、最初から解き直す(★と時間も最初から)。 */
+  const restart = () => {
+    update((draft) => {
+      draft.answers = {};
+      draft.checked = {};
+      draft.elapsedSec = 0;
+      draft.startedAt = Date.now();
+    });
+    setTimerKey((value) => value + 1);
+    setCurrentIndex(0);
+    setAskResume(false);
+  };
+
+  /** 答え合わせを済ませた1問だけを、解く前の状態に戻す。 */
+  const retry = (question: Question) =>
+    update((draft) => {
+      for (const slot of question.slots) delete draft.answers[slot.key];
+      if (draft.checked) {
+        draft.checked = { ...draft.checked };
+        delete draft.checked[question.id];
+      }
+    });
+
   const isChecked = (question: Question) => Boolean(attempt?.checked?.[question.id]);
   const canGrade = (question: Question) => Boolean(key && question.slots.every((slot) => key.answers[slot.key] !== undefined));
   const resultOf = (question: Question) => {
@@ -187,6 +214,9 @@ export function Practice({ examId, subjectId }: { examId: string; subjectId: Sub
         <div className="judge" role="status">
           <span className={all ? 'judge-ok' : 'judge-ng'}>{all ? '○ 正解' : '× 不正解'}</span>
           <span className="muted">{correctText}{unsure ? '(正答は自動読み取りのため要確認)' : ''}</span>
+          <button type="button" className="btn btn-small" onClick={() => retry(question)}>
+            解き直す
+          </button>
         </div>
       );
     }
@@ -269,9 +299,23 @@ export function Practice({ examId, subjectId }: { examId: string; subjectId: Sub
       <span className="work-title">
         {title} {subject.shortName}
       </span>
-      <Timer attemptRef={attemptRef} limitSec={subject.minutes * 60} onSave={persist} />
+      <Timer key={timerKey} attemptRef={attemptRef} limitSec={subject.minutes * 60} onSave={persist} />
     </div>
   );
+
+  const resumeBanner = askResume ? (
+    <div className="notice resume" role="dialog" aria-label="前回の解答">
+      <span>前回の解答が残っています({answered}/{questions.length}問)。</span>
+      <div className="actions">
+        <button type="button" className="btn btn-primary" onClick={() => setAskResume(false)}>
+          続きから解く
+        </button>
+        <button type="button" className="btn" onClick={restart}>
+          最初から解き直す
+        </button>
+      </div>
+    </div>
+  ) : null;
 
   const grid = (
     <div className="qgrid">
@@ -329,6 +373,7 @@ export function Practice({ examId, subjectId }: { examId: string; subjectId: Sub
     return (
       <div className="work work-compact">
         {topBar}
+        {resumeBanner}
         <ReflowView data={pdf} file={pdfFile} subject={subject} questionIndex={currentIndex} onPageChange={onPageChange} />
         <section className="dock" aria-label="解答欄">
           <div className="dock-head">
@@ -368,6 +413,7 @@ export function Practice({ examId, subjectId }: { examId: string; subjectId: Sub
   return (
     <div className="work work-wide">
       {topBar}
+      {resumeBanner}
       <div className="work-body">
         <PdfView data={pdf} onPageChange={onPageChange} />
         <aside className="side" aria-label="解答欄">

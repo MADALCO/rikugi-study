@@ -1141,3 +1141,16 @@ a.cell:hover {
   gap: 10px;
   justify-items: start;
 }
+
+/* 前回の解答が残っているときの選択 */
+.resume {
+  margin: 8px 12px 0;
+  display: grid;
+  gap: 8px;
+}
+
+.btn-small {
+  min-height: 32px;
+  padding: 4px 10px;
+  font-size: 0.8rem;
+}
